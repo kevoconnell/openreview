@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  if [[ "$SCRIPT_PATH" != /* ]]; then
+    SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+  fi
+done
+
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd -P)"
+DIST_RUNNER="$ROOT_DIR/dist/cli/openreview.js"
+SOURCE_RUNNER="$ROOT_DIR/src/cli/openreview.ts"
+TSX_BIN="$ROOT_DIR/node_modules/.bin/tsx"
+
+if [[ -x "$TSX_BIN" ]]; then
+  exec "$TSX_BIN" "$SOURCE_RUNNER" "$@"
+fi
+
+if [[ -f "$DIST_RUNNER" ]]; then
+  exec node "$DIST_RUNNER" "$@"
+fi
+
+printf 'OpenReview runner not found. Build the repo or install dependencies.\n' >&2
+exit 1
