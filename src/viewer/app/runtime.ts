@@ -50,6 +50,22 @@ import {
 
 const html = htm.bind(createElement);
 
+function getReviewScope(payload) {
+  return payload?.reviewScope === "repo" ? "repo" : "branch";
+}
+
+function buildRefreshMessage({ reviewScope, compareBranch, pendingLabel }) {
+  if (pendingLabel) {
+    return pendingLabel;
+  }
+
+  return reviewScope === "repo"
+    ? "The whole-repo review is thinking in the background…"
+    : compareBranch
+      ? `The branch review is thinking in the background. Using ${compareBranch} as the compare branch…`
+      : "The branch review is thinking in the background…";
+}
+
 const payloadElement = document.getElementById("viewer-data");
 const payload = payloadElement?.textContent
   ? JSON.parse(payloadElement.textContent)
@@ -66,11 +82,14 @@ function canHardResetViewer() {
 }
 
 function HardResetActions() {
+  const reviewScope = getReviewScope(payload);
   const [resetState, setResetState] = useState("idle");
   const [resetMessage, setResetMessage] = useState(
     canHardResetViewer()
       ? ""
-      : "Hard reset is unavailable until the viewer control server is running.",
+      : reviewScope === "repo"
+        ? "Hard reset is unavailable until the whole-repo viewer control server is running."
+        : "Hard reset is unavailable until the branch viewer control server is running.",
   );
 
   const handleHardReset = async () => {
@@ -79,12 +98,20 @@ function HardResetActions() {
     }
 
     setResetState("running");
-    setResetMessage("Hard resetting the viewer and rebuilding artifacts…");
+    setResetMessage(
+      reviewScope === "repo"
+        ? "Hard resetting the whole-repo viewer and rebuilding artifacts…"
+        : "Hard resetting the branch viewer and rebuilding artifacts…",
+    );
 
     try {
       await bootstrapViewerControl.actions.hardReset();
       setResetState("done");
-      setResetMessage("Hard reset complete. Reloading…");
+      setResetMessage(
+        reviewScope === "repo"
+          ? "Whole-repo hard reset complete. Reloading…"
+          : "Branch hard reset complete. Reloading…",
+      );
       window.setTimeout(() => window.location.reload(), 300);
     } catch (error) {
       setResetState("error");
@@ -117,7 +144,9 @@ function renderFatalViewerError(error) {
     return;
   }
 
-  rootElement.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;padding:32px;background:linear-gradient(180deg,#0a0f1b 0%, #0b1020 100%);color:#e7ecf5;font-family:Inter,ui-sans-serif,system-ui,sans-serif;"><div style="max-width:720px;width:100%;border:1px solid rgba(255,255,255,0.08);border-radius:18px;background:rgba(16,24,43,0.92);padding:24px;box-shadow:0 24px 60px rgba(2,6,23,0.45);"><p style="margin:0 0 8px;color:#9fb2ca;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;">OpenReview viewer failed</p><h1 style="margin:0 0 10px;font-size:20px;">The viewer hit a runtime error</h1><p id="openreview-fatal-error-message" style="margin:0;color:#cbd5e1;line-height:1.6;white-space:pre-wrap;"></p><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;"><button id="openreview-fatal-hard-reset" style="appearance:none;border:0;border-radius:10px;padding:11px 14px;background:#2563eb;color:#eff6ff;font-weight:600;cursor:pointer;">Hard reset viewer</button><button id="openreview-fatal-reload" style="appearance:none;border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:11px 14px;background:rgba(15,23,42,0.92);color:#cbd5e1;font-weight:600;cursor:pointer;">Reload</button></div><p id="openreview-fatal-status" style="margin:14px 0 0;color:#94a3b8;line-height:1.5;"></p></div></div>`;
+  const reviewScope = getReviewScope(payload);
+
+  rootElement.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;padding:32px;background:linear-gradient(180deg,#0a0f1b 0%, #0b1020 100%);color:#e7ecf5;font-family:Inter,ui-sans-serif,system-ui,sans-serif;"><div style="max-width:720px;width:100%;border:1px solid rgba(255,255,255,0.08);border-radius:18px;background:rgba(16,24,43,0.92);padding:24px;box-shadow:0 24px 60px rgba(2,6,23,0.45);"><p style="margin:0 0 8px;color:#9fb2ca;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;">OpenReview viewer failed</p><h1 style="margin:0 0 10px;font-size:20px;">The viewer hit a runtime error</h1><p id="openreview-fatal-error-message" style="margin:0;color:#cbd5e1;line-height:1.6;white-space:pre-wrap;"></p><div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;"><button id="openreview-fatal-hard-reset" style="appearance:none;border:0;border-radius:10px;padding:11px 14px;background:#2563eb;color:#eff6ff;font-weight:600;cursor:pointer;">${reviewScope === "repo" ? "Hard reset whole repo" : "Hard reset branch review"}</button><button id="openreview-fatal-reload" style="appearance:none;border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:11px 14px;background:rgba(15,23,42,0.92);color:#cbd5e1;font-weight:600;cursor:pointer;">Reload</button></div><p id="openreview-fatal-status" style="margin:14px 0 0;color:#94a3b8;line-height:1.5;"></p></div></div>`;
 
   const messageElement = document.getElementById("openreview-fatal-error-message");
   const hardResetButton = document.getElementById("openreview-fatal-hard-reset");
@@ -140,7 +169,11 @@ function renderFatalViewerError(error) {
     hardResetButton.setAttribute("disabled", "true");
     hardResetButton.style.opacity = "0.6";
     hardResetButton.style.cursor = "not-allowed";
-    setStatus("Hard reset is unavailable until the viewer control server is running.");
+    setStatus(
+      reviewScope === "repo"
+        ? "Hard reset is unavailable until the whole-repo viewer control server is running."
+        : "Hard reset is unavailable until the branch viewer control server is running.",
+    );
   }
 
   reloadButton?.addEventListener("click", () => window.location.reload());
@@ -151,10 +184,18 @@ function renderFatalViewerError(error) {
     hardResetButton.setAttribute("disabled", "true");
     hardResetButton.style.opacity = "0.6";
     hardResetButton.style.cursor = "progress";
-    setStatus("Hard resetting the viewer and rebuilding artifacts…");
+    setStatus(
+      reviewScope === "repo"
+        ? "Hard resetting the whole-repo viewer and rebuilding artifacts…"
+        : "Hard resetting the branch viewer and rebuilding artifacts…",
+    );
     try {
       await bootstrapViewerControl.actions.hardReset();
-      setStatus("Hard reset complete. Reloading…");
+      setStatus(
+        reviewScope === "repo"
+          ? "Whole-repo hard reset complete. Reloading…"
+          : "Branch hard reset complete. Reloading…",
+      );
       window.setTimeout(() => window.location.reload(), 300);
     } catch (requestError) {
       hardResetButton.removeAttribute("disabled");
@@ -709,7 +750,9 @@ function StatusPage({
   generatedAt,
   reviewDebug,
   sessionDebug,
+  payload,
 }) {
+  const reviewScope = getReviewScope(payload);
   const retryControl = useMemo(
     () => createViewerControlClient(sessionDebug?.viewer ?? {}),
     [sessionDebug?.viewer?.controlPort, sessionDebug?.viewer?.controlToken],
@@ -728,7 +771,9 @@ function StatusPage({
     try {
       await retryControl.actions.hardReset();
       setRetryMessage(
-        "Waiting for the OpenReview service to restart the review.",
+        reviewScope === "repo"
+          ? "Waiting for the whole-repo review to restart."
+          : "Waiting for the branch review to restart.",
       );
     } catch (error) {
       setRetryState("idle");
@@ -740,7 +785,9 @@ function StatusPage({
     return html`<${BasicStatusPage}
       title=${title}
       message=${retryState === "running"
-        ? "Retrying OpenReview and rebuilding the viewer shell."
+        ? reviewScope === "repo"
+          ? "Retrying whole-repo review and rebuilding the viewer shell."
+          : "Retrying branch review and rebuilding the viewer shell."
         : message}
       worktreePath=${worktreePath}
       tone=${tone}
@@ -815,6 +862,7 @@ function ViewerApp({ payload }) {
 
   const handleQueueReexamine = ({
     compare,
+    scope,
     generatedAt,
     message,
   }) => {
@@ -823,6 +871,7 @@ function ViewerApp({ payload }) {
         baseBranch: compare?.baseBranch ?? null,
         headBranch: compare?.headBranch ?? null,
       },
+      scope: scope === "repo" ? "repo" : "branch",
       generatedAt: generatedAt ?? null,
       sawBackgroundRun: false,
     });
@@ -937,9 +986,10 @@ function ViewerApp({ payload }) {
 
         if (pendingReexamine && nextViewerStatus === "starting") {
           setReexamineMessage(
-            pendingReexamine.compare?.baseBranch
-              ? `The OpenCode session is thinking in the background. Using ${pendingReexamine.compare.baseBranch} as the compare branch…`
-              : "The OpenCode session is thinking in the background…",
+            buildRefreshMessage({
+              reviewScope: pendingReexamine.scope,
+              compareBranch: pendingReexamine.compare?.baseBranch ?? null,
+            }),
           );
           setPendingReexamine((currentValue) =>
             currentValue && !currentValue.sawBackgroundRun
@@ -1062,6 +1112,7 @@ function ViewerApp({ payload }) {
             generatedAt=${livePayload.generatedAt}
             reviewDebug=${livePayload.reviewDebug}
             sessionDebug=${livePayload.sessionDebug}
+            payload=${livePayload}
           />`;
         case "overview":
           return html`<${OverviewGraphPage}
@@ -1083,6 +1134,7 @@ function ViewerApp({ payload }) {
             tone="error"
             reviewDebug=${livePayload.reviewDebug}
             sessionDebug=${livePayload.sessionDebug}
+            payload=${livePayload}
           />`;
       }
     } catch (error) {
@@ -1093,6 +1145,7 @@ function ViewerApp({ payload }) {
         tone="error"
         reviewDebug=${livePayload.reviewDebug}
         sessionDebug=${livePayload.sessionDebug}
+        payload=${livePayload}
       />`;
     }
   })();

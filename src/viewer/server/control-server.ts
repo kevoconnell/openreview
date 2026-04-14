@@ -4,8 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveReviewConfig } from "../../config/review-config.js";
+import { getReviewOutputDirName, type TReviewScope } from "../../config/review-scope.js";
 import { runOpenCodePrompt } from "../../opencode/review-client.js";
 import { ensureRepoOpenCodeServer, resolveRepoRoot } from "../../opencode/server.js";
 import { generateReview } from "../../pipeline/generate-review.js";
@@ -84,6 +85,11 @@ async function resolveViewerControlCodeVersion({
       "src/pipeline/build-review-prompt.ts",
       "dist/pipeline/build-review-prompt.js",
     ],
+    [
+      "src/pipeline/build-repo-review-prompt.ts",
+      "dist/pipeline/build-repo-review-prompt.js",
+    ],
+    ["src/config/review-scope.ts", "dist/config/review-scope.js"],
   ];
 
   const signatures: string[] = [];
@@ -475,6 +481,7 @@ type TViewerRefreshMode = "full" | "incremental";
 type TViewerRefreshRequest = {
   mode: TViewerRefreshMode;
   compare?: TReviewCompare;
+  scope?: TReviewScope;
 };
 
 function normalizeViewerRefreshMode(
@@ -486,6 +493,16 @@ function normalizeViewerRefreshMode(
 
   if (value === "incremental" || value === "reexamine") {
     return "incremental";
+  }
+
+  return null;
+}
+
+function normalizeViewerRefreshScope(
+  value: unknown,
+): TReviewScope | null {
+  if (value === "branch" || value === "repo") {
+    return value;
   }
 
   return null;
@@ -503,6 +520,12 @@ function parseRefreshRequest(body: unknown): TViewerRefreshRequest | null {
 
   return {
     mode,
+    ...(Object.hasOwn(body, "scope")
+      ? (() => {
+          const scope = normalizeViewerRefreshScope(body.scope);
+          return scope ? { scope } : {};
+        })()
+      : {}),
     ...(Object.hasOwn(body, "compare")
       ? {
           compare: normalizeReviewCompare(
@@ -610,6 +633,109 @@ function buildFixPromptWithFiles({
   return sections.filter(Boolean).join("\n\n");
 }
 
+async function resolveViewerIndexUrl({
+  repoPath,
+  outputDirName,
+}: {
+  repoPath: string;
+  outputDirName: string;
+}): Promise<string> {
+  const viewerRoot = path.join(repoPath, outputDirName, "runtime", "viewer");
+
+  try {
+    const entries = await fs.readdir(viewerRoot, { withFileTypes: true });
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const indexPath = path.join(viewerRoot, entry.name, "index.html");
+          try {
+            const stat = await fs.stat(indexPath);
+            return stat.isFile()
+              ? { indexPath, modifiedAt: stat.mtimeMs }
+              : null;
+          } catch {
+            return null;
+          }
+        }),
+    );
+
+    const latestIndexPath = candidates
+      .filter(
+        (
+          candidate,
+        ): candidate is {
+          indexPath: string;
+          modifiedAt: number;
+        } => candidate !== null,
+      )
+      .sort((left, right) => right.modifiedAt - left.modifiedAt)[0]?.indexPath;
+
+    if (latestIndexPath) {
+      return pathToFileURL(latestIndexPath).toString();
+    }
+  } catch {
+    // Fall back to the default workspace path below.
+  }
+
+  return pathToFileURL(
+    path.join(viewerRoot, "workspace-default", "index.html"),
+  ).toString();
+}
+
+async function readViewerStatus(port: number): Promise<{
+  viewer: { controlToken?: string | null } | null;
+} | null> {
+  return await new Promise((resolve) => {
+    const request = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/control/status",
+        method: "GET",
+        timeout: 4000,
+      },
+      async (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          try {
+            const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              sessionDebug?: {
+                viewer?: {
+                  controlToken?: string | null;
+                };
+              };
+            };
+            resolve(
+              payload?.sessionDebug?.viewer
+                ? {
+                    viewer: {
+                      controlToken:
+                        typeof payload.sessionDebug.viewer.controlToken ===
+                        "string"
+                          ? payload.sessionDebug.viewer.controlToken
+                          : null,
+                    },
+                  }
+                : null,
+            );
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+
+    request.on("timeout", () => {
+      request.destroy();
+      resolve(null);
+    });
+    request.on("error", () => resolve(null));
+    request.end();
+  });
+}
+
 export async function runViewerControlServer({
   repoPath,
   outputDirName = ".openreview",
@@ -624,16 +750,22 @@ export async function runViewerControlServer({
   const controlToken = randomUUID();
 
   const refreshViewer = async ({
+    repoOutputDirName = outputDirName,
+    controlPort = port,
+    controlToken: nextControlToken = controlToken,
     compare,
   }: {
+    repoOutputDirName?: string;
+    controlPort?: number;
+    controlToken?: string | null;
     compare?: TReviewCompare;
   } = {}): Promise<void> => {
-    await syncCheckedInViewerAssets({ repoPath, outputDirName });
+    await syncCheckedInViewerAssets({ repoPath, outputDirName: repoOutputDirName });
     await syncViewerPayloads({
       repoPath,
-      outputDirName,
-      controlPort: port,
-      controlToken,
+      outputDirName: repoOutputDirName,
+      controlPort,
+      controlToken: nextControlToken,
       ...(compare !== undefined ? { compare } : {}),
     });
   };
@@ -715,7 +847,7 @@ export async function runViewerControlServer({
 
       if (!refreshRequest) {
         writeJson(response, 400, {
-          error: "Expected a JSON body with mode and optional compare.",
+          error: "Expected a JSON body with mode, optional compare, and optional scope.",
         });
         return;
       }
@@ -736,6 +868,22 @@ export async function runViewerControlServer({
         refreshRequest.compare !== undefined
           ? normalizeReviewCompare(refreshRequest.compare)
           : undefined;
+      const currentScope: TReviewScope =
+        outputDirName === getReviewOutputDirName("repo") ? "repo" : "branch";
+      const targetScope = refreshRequest.scope ?? currentScope;
+      const targetOutputDirName = getReviewOutputDirName(targetScope);
+      const shouldRedirectToTarget = targetOutputDirName !== outputDirName;
+      const refreshCompare =
+        targetScope === "branch" && refreshRequest.mode === "incremental"
+          ? reviewCompare
+          : undefined;
+
+      if (targetScope === "repo" && refreshRequest.mode === "incremental") {
+        writeJson(response, 400, {
+          error: "Whole-repo review mode does not support incremental refresh.",
+        });
+        return;
+      }
 
       reexamineState = "running";
       lastError = null;
@@ -745,11 +893,26 @@ export async function runViewerControlServer({
           await generateReview({
             repoPath,
             mode: refreshRequest.mode,
-            ...(reviewCompare !== undefined ? { compare: reviewCompare } : {}),
+            scope: targetScope,
+            ...(refreshCompare !== undefined ? { compare: refreshCompare } : {}),
           });
-          await refreshViewer(
-            reviewCompare !== undefined ? { compare: reviewCompare } : undefined,
-          );
+          if (shouldRedirectToTarget) {
+            const targetPort = await ensureViewerControlServer({
+              repoPath,
+              outputDirName: targetOutputDirName,
+            });
+            const targetStatus = await readViewerStatus(targetPort);
+            await refreshViewer({
+              repoOutputDirName: targetOutputDirName,
+              controlPort: targetPort,
+              controlToken: targetStatus?.viewer?.controlToken ?? null,
+              ...(refreshCompare !== undefined ? { compare: refreshCompare } : {}),
+            });
+          } else {
+            await refreshViewer(
+              refreshCompare !== undefined ? { compare: refreshCompare } : undefined,
+            );
+          }
           reexamineState = "idle";
           lastError = null;
         } catch (error) {
@@ -770,7 +933,16 @@ export async function runViewerControlServer({
 
       try {
         await runRefresh();
-        writeJson(response, 200, { ok: true });
+        const nextUrl = shouldRedirectToTarget
+          ? await resolveViewerIndexUrl({
+              repoPath,
+              outputDirName: targetOutputDirName,
+            })
+          : null;
+        writeJson(response, 200, {
+          ok: true,
+          ...(nextUrl ? { nextUrl } : {}),
+        });
       } catch {
         writeJson(response, 500, { error: lastError });
       }

@@ -42,6 +42,18 @@ import {
 const html = htm.bind(createElement);
 const MAX_VISIBLE_SHARED_CONSUMERS = 6;
 
+function getReviewScope(payload) {
+  return payload?.reviewScope === "repo" ? "repo" : "branch";
+}
+
+function buildRefreshMessage({ reviewScope, compareBranch }) {
+  return reviewScope === "repo"
+    ? "The whole-repo review is refreshing in the background, and this page will update when it is ready."
+    : compareBranch
+      ? `The branch review is thinking in the background. Using ${compareBranch} as the compare branch, and this page will refresh when it is ready.`
+      : "The branch review is thinking in the background, and this page will refresh when it is ready.";
+}
+
 
 function OverviewGraphPage({
   payload,
@@ -243,6 +255,7 @@ function OverviewGraphPage({
         .filter(Boolean);
       return segments[segments.length - 1] ?? "local-branch";
     })();
+  const reviewScope = getReviewScope(payload);
   const viewerControl = useMemo(
     () => createViewerControlClient(payload?.sessionDebug?.viewer ?? {}),
     [
@@ -256,6 +269,13 @@ function OverviewGraphPage({
     viewerControl.isAvailable(),
   );
   useEffect(() => {
+    if (reviewScope === "repo") {
+      setFetchedBranches([]);
+      setFetchedCurrentBranch(null);
+      setCompareOptionsLoading(false);
+      return undefined;
+    }
+
     if (!viewerControl.isAvailable()) {
       setFetchedBranches([]);
       setFetchedCurrentBranch(null);
@@ -286,7 +306,7 @@ function OverviewGraphPage({
     })();
 
     return () => abortController.abort();
-  }, [viewerControl]);
+  }, [reviewScope, viewerControl]);
   const currentBranchName = fetchedCurrentBranch || branchName;
   const compareBranchResolution = useMemo(
     () =>
@@ -970,29 +990,95 @@ function OverviewGraphPage({
     () => summarizeArchitectureIssues(reviewIssues),
     [reviewIssues],
   );
+  const isBranchReview = reviewScope !== "repo";
   const handleReexamine = async () => {
     if (!viewerControl.isAvailable()) {
       onReexamineError(
-        "Reexamine needs the viewer service. Start or refresh OpenReview, then try again.",
+        reviewScope === "repo"
+          ? "Whole-repo review needs the viewer service. Start or refresh OpenReview, then try again."
+          : "Branch review needs the viewer service. Start or refresh OpenReview, then try again.",
       );
       return;
     }
 
-    const selectedCompare = {
-      baseBranch: compareBranch || null,
-      headBranch: null,
-    };
+    const selectedCompare = isBranchReview
+      ? {
+          baseBranch: compareBranch || null,
+          headBranch: null,
+        }
+      : null;
+    const nextMode = isBranchReview ? "incremental" : "full";
 
     onQueueReexamine({
       compare: selectedCompare,
+      scope: reviewScope,
       generatedAt: payload.generatedAt ?? null,
-      message: selectedCompare.baseBranch
-        ? `The OpenCode session is thinking in the background. Using ${selectedCompare.baseBranch} as the compare branch, and this page will refresh when it is ready.`
-        : "The OpenCode session is thinking in the background, and this page will refresh when it is ready.",
+      message: buildRefreshMessage({
+        reviewScope,
+        compareBranch: selectedCompare?.baseBranch ?? null,
+      }),
     });
 
     try {
-      await viewerControl.actions.reexamine(selectedCompare);
+      const response = await viewerControl.actions.refresh({
+        mode: nextMode,
+        ...(selectedCompare ? { compare: selectedCompare } : {}),
+        scope: reviewScope,
+      });
+      if (response?.nextUrl) {
+        const nextUrl = new URL(response.nextUrl);
+        if (debugOpen) {
+          nextUrl.searchParams.set("debug", "1");
+        }
+        window.location.replace(nextUrl.toString());
+        return;
+      }
+    } catch (error) {
+      onReexamineError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
+  const handleScopeChange = async (nextScope) => {
+    if (nextScope === reviewScope) {
+      return;
+    }
+
+    if (!viewerControl.isAvailable()) {
+      onReexamineError(
+        nextScope === "repo"
+          ? "Switching to whole-repo review needs the viewer service. Start or refresh OpenReview, then try again."
+          : "Switching to branch review needs the viewer service. Start or refresh OpenReview, then try again.",
+      );
+      return;
+    }
+
+    onQueueReexamine({
+      compare: null,
+      scope: nextScope,
+      generatedAt: payload.generatedAt ?? null,
+      message:
+        nextScope === "repo"
+          ? "Switching to whole-repo review. The repository will be refreshed in the background, and the viewer will redirect when it is ready."
+          : "Switching to branch review. The branch viewer will refresh in the background, and the viewer will redirect when it is ready.",
+    });
+
+    try {
+      const response = await viewerControl.actions.refresh({
+        mode: "full",
+        scope: nextScope,
+      });
+      if (response?.nextUrl) {
+        const nextUrl = new URL(response.nextUrl);
+        if (debugOpen) {
+          nextUrl.searchParams.set("debug", "1");
+        }
+        window.location.replace(nextUrl.toString());
+        return;
+      }
+
+      window.location.reload();
     } catch (error) {
       onReexamineError(
         error instanceof Error ? error.message : String(error),
@@ -1004,6 +1090,10 @@ function OverviewGraphPage({
     setActiveIssueId(null);
     setFocusedNodeId(node.id);
     setSelectedPath(interfaceGraph.primaryPathByNodeId[node.id] ?? null);
+  };
+
+  const handleOpenInterface = (node) => {
+    handleSelectNode(node);
   };
 
   const handleSelectIssue = (issue) => {
@@ -1035,6 +1125,8 @@ function OverviewGraphPage({
           compareOptions=${compareBranchResolution.options}
           setCompareBranch=${setCompareBranch}
           compareOptionsLoading=${compareOptionsLoading}
+          reviewScope=${reviewScope}
+          onReviewScopeChange=${handleScopeChange}
           graphSummary=${graphSummary}
           worktreePath=${payload.worktreePath}
           onReexamine=${handleReexamine}
@@ -1321,6 +1413,7 @@ function OverviewGraphPage({
                 ] ?? []}
                 findings=${issuesByNodeId[focusedNode.id] ?? []}
                 selectedIssue=${activeIssue}
+                onOpenInterface=${handleOpenInterface}
                 onSelectIssue=${handleSelectIssue}
                 worktreePath=${payload.worktreePath}
               />`

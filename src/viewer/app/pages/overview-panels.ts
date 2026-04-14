@@ -696,6 +696,7 @@ function ProviderDetailsPanel({
   interfaceItems,
   findings,
   selectedIssue,
+  onOpenInterface,
   onSelectIssue,
   worktreePath,
 }) {
@@ -785,7 +786,7 @@ function ProviderDetailsPanel({
                 <button
                   className="inspector-inline-action"
                   onClick=${() =>
-                    onSelectNode({
+                    onOpenInterface({
                       id: getInterfaceNodeId(item),
                       label: item.name,
                       path: item.path,

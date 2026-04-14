@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { generateReview } from "../index.js";
-import { DEFAULT_REVIEW_CONFIG } from "../config/review-config.js";
+import { getReviewOutputDirName, type TReviewScope } from "../config/review-scope.js";
 import { ensureViewerControlServer } from "../viewer/server/control-server.js";
 import { syncViewerPayloads } from "../viewer/data/sync-payloads.js";
 import { syncCheckedInViewerAssets } from "../viewer/build/sync-assets.js";
@@ -48,12 +48,14 @@ Commands:
 Options:
   --local <path>     Run against a specific repository path
   --incremental      Use incremental review mode
+  --whole-repo       Review the whole repository interface surface
   -h, --help         Show this help text
 
 Examples:
   openreview
   openreview open
   openreview generate --local ../my-repo
+  openreview generate --whole-repo
   openreview refresh --incremental
   openreview show-doc architecture.md
   openreview status
@@ -91,11 +93,13 @@ function getCommand(argv: string[]): TNativeCommand {
 function parseArgs(argv: string[]): {
   repoPath: string;
   mode: TReviewIntent;
+  scope: TReviewScope;
   docFileName: string | null;
 } {
   const invocationDir = resolveInvocationDir();
   let repoPath = invocationDir;
   let mode: TReviewIntent = "full";
+  let scope: TReviewScope = "branch";
   let docFileName: string | null = null;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -116,12 +120,21 @@ function parseArgs(argv: string[]): {
       continue;
     }
 
+    if (argument === "--whole-repo") {
+      scope = "repo";
+      continue;
+    }
+
     if (!argument.startsWith("-") && docFileName === null) {
       docFileName = argument;
     }
   }
 
-  return { repoPath, mode, docFileName };
+  if (scope === "repo" && mode === "incremental") {
+    throw new Error("--whole-repo cannot be combined with --incremental.");
+  }
+
+  return { repoPath, mode, scope, docFileName };
 }
 
 function getCommandArgs(argv: string[], command: TNativeCommand): string[] {
@@ -137,12 +150,12 @@ function getCommandArgs(argv: string[], command: TNativeCommand): string[] {
   return nextArgs;
 }
 
-function getOutputPaths(repoPath: string): {
+function getOutputPaths(repoPath: string, scope: TReviewScope): {
   outputDir: string;
   overviewPath: string;
   fileInsightsPath: string;
 } {
-  const outputDir = path.join(repoPath, DEFAULT_REVIEW_CONFIG.outputDirName);
+  const outputDir = path.join(repoPath, getReviewOutputDirName(scope));
   return {
     outputDir,
     overviewPath: path.join(outputDir, "overview.md"),
@@ -163,10 +176,11 @@ async function ensurePathExists(
 
 async function findLatestViewerIndexPath(
   repoPath: string,
+  scope: TReviewScope,
 ): Promise<string | null> {
   const viewerDir = path.join(
     repoPath,
-    DEFAULT_REVIEW_CONFIG.outputDirName,
+    getReviewOutputDirName(scope),
     "runtime",
     "viewer",
   );
@@ -213,15 +227,16 @@ async function findLatestViewerIndexPath(
   return latestEntry?.indexPath ?? null;
 }
 
-async function getOverviewOpenPath(repoPath: string): Promise<string> {
-  await syncCheckedInViewerAssets({ repoPath });
-  const viewerIndexPath = await findLatestViewerIndexPath(repoPath);
+async function getOverviewOpenPath(repoPath: string, scope: TReviewScope): Promise<string> {
+  await syncCheckedInViewerAssets({ repoPath, outputDirName: getReviewOutputDirName(scope) });
+  const viewerIndexPath = await findLatestViewerIndexPath(repoPath, scope);
   if (!viewerIndexPath) {
-    return getOutputPaths(repoPath).overviewPath;
+    return getOutputPaths(repoPath, scope).overviewPath;
   }
 
-  const controlPort = await ensureViewerControlServer({ repoPath });
-  await syncViewerPayloads({ repoPath, controlPort });
+  const outputDirName = getReviewOutputDirName(scope);
+  const controlPort = await ensureViewerControlServer({ repoPath, outputDirName });
+  await syncViewerPayloads({ repoPath, controlPort, outputDirName });
   return viewerIndexPath;
 }
 
@@ -295,15 +310,18 @@ async function openPath(targetPath: string): Promise<void> {
 async function runGenerate({
   repoPath,
   mode,
+  scope,
   quiet = false,
 }: {
   repoPath: string;
   mode: TReviewIntent;
+  scope: TReviewScope;
   quiet?: boolean;
 }) {
   const result = await generateReview({
     repoPath,
     mode,
+    scope,
   });
 
   if (!quiet) {
@@ -320,8 +338,9 @@ async function runGenerate({
     );
   }
 
-  const controlPort = await ensureViewerControlServer({ repoPath });
-  await syncViewerPayloads({ repoPath, controlPort });
+  const outputDirName = getReviewOutputDirName(scope);
+  const controlPort = await ensureViewerControlServer({ repoPath, outputDirName });
+  await syncViewerPayloads({ repoPath, controlPort, outputDirName });
 
   return result;
 }
@@ -334,26 +353,26 @@ async function main(): Promise<void> {
   }
   const command = getCommand(argv);
   const commandArgs = getCommandArgs(argv, command);
-  const { repoPath, mode, docFileName } = parseArgs(commandArgs);
+  const { repoPath, mode, scope, docFileName } = parseArgs(commandArgs);
 
   switch (command) {
     case "generate":
     case "refresh": {
-      await runGenerate({ repoPath, mode });
+      await runGenerate({ repoPath, mode, scope });
       return;
     }
     case "open": {
-      let targetPath = await getOverviewOpenPath(repoPath);
+      let targetPath = await getOverviewOpenPath(repoPath, scope);
       if (!(await pathExists(targetPath))) {
-        const result = await runGenerate({ repoPath, mode, quiet: true });
-        targetPath = (await getOverviewOpenPath(repoPath)) || result.overviewPath;
+        const result = await runGenerate({ repoPath, mode, scope, quiet: true });
+        targetPath = (await getOverviewOpenPath(repoPath, scope)) || result.overviewPath;
       }
       await ensurePathExists(targetPath, "Overview file");
       await openPath(targetPath);
       return;
     }
     case "show-overview": {
-      const targetPath = await getOverviewOpenPath(repoPath);
+      const targetPath = await getOverviewOpenPath(repoPath, scope);
       await ensurePathExists(targetPath, "Overview file");
       await openPath(targetPath);
       return;
@@ -362,7 +381,7 @@ async function main(): Promise<void> {
       if (!docFileName) {
         throw new Error("Missing document name for show-doc");
       }
-      const { outputDir } = getOutputPaths(repoPath);
+      const { outputDir } = getOutputPaths(repoPath, scope);
       const targetPath = path.resolve(outputDir, docFileName);
       if (
         !targetPath.startsWith(`${outputDir}${path.sep}`) &&
@@ -378,8 +397,8 @@ async function main(): Promise<void> {
     }
     case "status": {
       const { outputDir, overviewPath, fileInsightsPath } =
-        getOutputPaths(repoPath);
-      const viewerIndexPath = await findLatestViewerIndexPath(repoPath);
+        getOutputPaths(repoPath, scope);
+      const viewerIndexPath = await findLatestViewerIndexPath(repoPath, scope);
       const [
         outputDirExists,
         overviewExists,

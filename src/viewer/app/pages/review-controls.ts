@@ -100,12 +100,39 @@ function GitReviewBranchDropdown({
   `;
 }
 
+function GitReviewScopeToggle({
+  reviewScope,
+  onChange,
+  disabled,
+}) {
+  return html`
+    <div className="git-review-scope-toggle" role="group" aria-label="Review scope">
+      <button
+        className=${`git-review-action git-review-scope-button ${reviewScope === "branch" ? "active" : ""}`}
+        onClick=${() => onChange("branch")}
+        disabled=${disabled}
+      >
+        Branch review
+      </button>
+      <button
+        className=${`git-review-action git-review-scope-button ${reviewScope === "repo" ? "active" : ""}`}
+        onClick=${() => onChange("repo")}
+        disabled=${disabled}
+      >
+        Whole repo
+      </button>
+    </div>
+  `;
+}
+
 function GitReviewTopbar({
   currentBranch,
   compareBranch,
   compareOptions,
   setCompareBranch,
   compareOptionsLoading,
+  reviewScope,
+  onReviewScopeChange,
   onReexamine,
   reexamineState,
   reexamineMessage,
@@ -114,24 +141,43 @@ function GitReviewTopbar({
 }) {
   const reexamineDisabled = reexamineState === "running";
   const isReexamining = reexamineState === "running";
+  const isBranchReview = reviewScope !== "repo";
 
   return html`
     <section className="git-review-topbar">
       <div className="git-review-left">
-        <${GitReviewBranchDropdown}
-          compareBranch=${compareBranch}
-          compareOptions=${compareOptions}
-          setCompareBranch=${setCompareBranch}
-          loading=${compareOptionsLoading}
+        <${GitReviewScopeToggle}
+          reviewScope=${reviewScope}
+          onChange=${onReviewScopeChange}
+          disabled=${reexamineDisabled}
         />
-        <span className="git-review-arrow">←</span>
-        <span className="git-review-branch-name">${currentBranch}</span>
+        ${isBranchReview
+          ? html`
+              <${GitReviewBranchDropdown}
+                compareBranch=${compareBranch}
+                compareOptions=${compareOptions}
+                setCompareBranch=${setCompareBranch}
+                loading=${compareOptionsLoading}
+              />
+              <span className="git-review-arrow">←</span>
+              <span className="git-review-branch-name">${currentBranch}</span>
+            `
+          : html`
+              <span className="git-review-scope-copy">
+                Whole-repo review scans the full repository snapshot.
+              </span>
+            `}
       </div>
       <div className="git-review-right">
         ${isReexamining
           ? html`<span className="git-review-status-indicator" role="status" aria-live="polite">
               <span className="git-review-status-dot" aria-hidden="true"></span>
-              OpenCode is thinking…
+              ${isBranchReview ? "OpenCode is thinking…" : "OpenCode is refreshing…"}
+            </span>`
+          : null}
+        ${isBranchReview
+          ? html`<span className="git-review-scope-note">
+              ${`Comparing against ${compareBranch || "your selected branch"}`}
             </span>`
           : null}
         <button className="git-review-action" onClick=${onToggleDebug}>
@@ -142,7 +188,13 @@ function GitReviewTopbar({
           onClick=${onReexamine}
           disabled=${reexamineDisabled}
         >
-          ${isReexamining ? "Analyzing…" : "Reexamine"}
+          ${isReexamining
+            ? isBranchReview
+              ? "Analyzing…"
+              : "Refreshing…"
+            : isBranchReview
+              ? "Reexamine"
+              : "Refresh repo"}
         </button>
       </div>
       ${isReexamining

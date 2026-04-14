@@ -45,6 +45,10 @@ function normalizeReviewCompare(compare) {
   return normalizedCompare;
 }
 
+function normalizeReviewScope(scope) {
+  return scope === "repo" || scope === "branch" ? scope : null;
+}
+
 function normalizeControlBinding({ controlPort, controlToken } = {}) {
   return {
     controlPort: hasControlPort(controlPort) ? controlPort : null,
@@ -188,30 +192,32 @@ export function createViewerControlClient(binding = {}) {
   };
 
   const actions = {
-    async hardReset() {
-      await runAction("/control/refresh", {
-        requireAuth: true,
-        includeJson: true,
-        body: JSON.stringify({ mode: "full" }),
-        unavailableMessage:
-          "Hard reset is unavailable until the viewer control server is running.",
-        failureMessage: (status) =>
-          `Hard reset failed with status ${status}.`,
-      });
-    },
-    async reexamine(compare) {
+    async refresh({ mode, compare, scope } = {}) {
       const normalizedCompare = normalizeReviewCompare(compare);
-      await runAction("/control/refresh", {
+      const normalizedScope = normalizeReviewScope(scope);
+
+      const response = await runAction("/control/refresh", {
         requireAuth: true,
         includeJson: true,
         body: JSON.stringify({
-          mode: "incremental",
+          mode,
           ...(normalizedCompare ? { compare: normalizedCompare } : {}),
+          ...(normalizedScope ? { scope: normalizedScope } : {}),
         }),
         unavailableMessage:
-          "Reexamine needs the viewer service. Start or refresh OpenReview, then try again.",
-        failureMessage: (status) =>
-          `Reexamine request failed with status ${status}.`,
+          "Viewer refresh is unavailable until the control server is running.",
+        failureMessage: (status) => `Viewer refresh failed with status ${status}.`,
+      });
+
+      return response.json();
+    },
+    async hardReset() {
+      return actions.refresh({ mode: "full" });
+    },
+    async reexamine(compare) {
+      return actions.refresh({
+        mode: "incremental",
+        compare,
       });
     },
     async sendFixPrompt({ prompt, files }) {

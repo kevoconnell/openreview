@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { SnapshotCollectionError } from "../errors.js"
+import type { TReviewScope } from "../config/review-scope.js"
 import {
   resolveReviewCompare,
   type TReviewCompare,
@@ -52,9 +53,15 @@ const TEXT_EXTENSIONS = new Set([
 ])
 
 const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"])
-const IGNORED_DIRS = new Set([".git", "node_modules", "dist", ".openreview"])
-const MAX_FILE_TREE_ENTRIES = 80
-const MAX_REPRESENTATIVE_FILES = 16
+const IGNORED_DIRS = new Set([".git", "node_modules", "dist"])
+const MAX_FILE_TREE_ENTRIES: Record<TReviewScope, number> = {
+  branch: 80,
+  repo: 180,
+}
+const MAX_REPRESENTATIVE_FILES: Record<TReviewScope, number> = {
+  branch: 16,
+  repo: 24,
+}
 const MAX_README_LENGTH = 4000
 const MAX_PACKAGE_JSON_LENGTH = 2000
 const MAX_FILE_EXCERPT_LENGTH = 900
@@ -68,7 +75,7 @@ function isInterfaceReviewableFile(filePath: string): boolean {
     return false
   }
 
-  if (normalizedPath.startsWith(".openreview/")) {
+  if (/(^|\/)\.openreview(?:-[^/]+)?\//u.test(normalizedPath)) {
     return false
   }
 
@@ -89,6 +96,10 @@ function isInterfaceReviewableFile(filePath: string): boolean {
   }
 
   return true
+}
+
+function isIgnoredDirName(dirName: string): boolean {
+  return IGNORED_DIRS.has(dirName) || dirName.startsWith(".openreview")
 }
 
 async function safeReadText(filePath: string): Promise<string | null> {
@@ -118,7 +129,7 @@ async function listFiles(root: string, limit = 260): Promise<string[]> {
 
     const entries = await fs.readdir(current, { withFileTypes: true })
     for (const entry of entries) {
-      if (IGNORED_DIRS.has(entry.name)) continue
+      if (isIgnoredDirName(entry.name)) continue
 
       const absolutePath = path.join(current, entry.name)
       if (entry.isDirectory()) {
@@ -210,6 +221,49 @@ function getCriticalImpactReasons(filePath: string): string[] {
   }
 
   return reasons
+}
+
+function getFileDepth(filePath: string): number {
+  return filePath.split("/").length
+}
+
+function scoreRepositoryFile({
+  filePath,
+  changedStatuses,
+  impactedFiles,
+  graph,
+}: {
+  filePath: string
+  changedStatuses: Map<string, string>
+  impactedFiles: Map<string, { impactSources: Set<string>; impactReasons: Set<string> }>
+  graph: TGraph
+}): number {
+  const basename = path.posix.basename(filePath)
+  const impactReasons = getCriticalImpactReasons(filePath)
+  const consumerCount = graph.incoming.get(filePath)?.size ?? 0
+  const dependencyCount = graph.outgoing.get(filePath)?.size ?? 0
+  const depthBonus = Math.max(0, 10 - getFileDepth(filePath)) * 2
+  const entrypointBonus =
+    basename.startsWith("index.") || basename.startsWith("main.") ||
+    basename.startsWith("client.") || basename.startsWith("server.") ||
+    basename.startsWith("app.") || basename.startsWith("api.")
+      ? 25
+      : 0
+
+  return (
+    (changedStatuses.has(filePath) ? 200 : 0) +
+    (impactedFiles.has(filePath) ? 120 : 0) +
+    consumerCount * 24 +
+    dependencyCount * 6 +
+    impactReasons.reduce((acc, reason) => {
+      if (reason === "repo-critical") return acc + 90
+      if (reason === "entrypoint") return acc + 70
+      if (reason === "barrel-file") return acc + 45
+      return acc
+    }, 0) +
+    entrypointBonus +
+    depthBonus
+  )
 }
 
 function extractRelativeImports({
@@ -427,11 +481,11 @@ function collectImpactedFiles({
 
 export async function collectRepoSnapshot({
   repoPath,
-  fileLimit = MAX_FILE_TREE_ENTRIES,
+  scope = "branch",
   compare,
 }: {
   repoPath: string
-  fileLimit?: number
+  scope?: TReviewScope
   compare?: Partial<TReviewCompare> | null
 }): Promise<TRepoSnapshot> {
   const resolvedRepoPath = path.resolve(repoPath)
@@ -442,6 +496,7 @@ export async function collectRepoSnapshot({
   }
 
   const repoName = path.basename(resolvedRepoPath)
+  const fileLimit = MAX_FILE_TREE_ENTRIES[scope]
   const readmePath = path.join(resolvedRepoPath, "README.md")
   const packageJsonPath = path.join(resolvedRepoPath, "package.json")
   const fileTree = await listFiles(resolvedRepoPath, fileLimit)
@@ -472,33 +527,48 @@ export async function collectRepoSnapshot({
   })
   const changedCodeFiles = [...changedStatuses.keys()].filter(isInterfaceReviewableFile)
 
-  const candidatePaths = new Set<string>([
-    ...changedCodeFiles,
-    ...impactedFiles.keys(),
-  ])
+  const candidatePaths =
+    scope === "repo"
+      ? new Set(fileTree.filter(isInterfaceReviewableFile))
+      : new Set<string>([...changedCodeFiles, ...impactedFiles.keys()])
   const rankedPaths = [...candidatePaths]
-    .filter((filePath) => isInterfaceReviewableFile(filePath) && (fileTree.includes(filePath) || changedStatuses.has(filePath)))
+    .filter((filePath) => isInterfaceReviewableFile(filePath) && fileTree.includes(filePath))
     .sort((left, right) => {
-      const leftChanged = changedStatuses.has(left)
-      const rightChanged = changedStatuses.has(right)
-      if (leftChanged !== rightChanged) {
-        return leftChanged ? -1 : 1
+      if (scope === "branch") {
+        const leftChanged = changedStatuses.has(left)
+        const rightChanged = changedStatuses.has(right)
+        if (leftChanged !== rightChanged) {
+          return leftChanged ? -1 : 1
+        }
+        const leftImpacted = impactedFiles.has(left)
+        const rightImpacted = impactedFiles.has(right)
+        if (leftImpacted !== rightImpacted) {
+          return leftImpacted ? -1 : 1
+        }
       }
+
+      const scoreDelta =
+        scoreRepositoryFile({ filePath: right, changedStatuses, impactedFiles, graph }) -
+        scoreRepositoryFile({ filePath: left, changedStatuses, impactedFiles, graph })
+      if (scoreDelta !== 0) {
+        return scoreDelta
+      }
+
       return left.localeCompare(right)
     })
-    .slice(0, MAX_REPRESENTATIVE_FILES)
+    .slice(0, MAX_REPRESENTATIVE_FILES[scope])
 
   const files = await Promise.all(
     rankedPaths.map(async (relativePath) => {
       const content = await safeReadText(path.join(resolvedRepoPath, relativePath))
       const impacted = impactedFiles.get(relativePath)
       const gitStatus = changedStatuses.get(relativePath) ?? null
-        return {
-          path: relativePath,
-          basename: path.basename(relativePath),
-          excerpt: buildExcerpt(content, MAX_FILE_EXCERPT_LENGTH),
-          gitStatus,
-          changeType: mapGitStatusToChangeType(gitStatus),
+      return {
+        path: relativePath,
+        basename: path.basename(relativePath),
+        excerpt: buildExcerpt(content, MAX_FILE_EXCERPT_LENGTH),
+        gitStatus,
+        changeType: mapGitStatusToChangeType(gitStatus),
         state: changedStatuses.has(relativePath)
           ? "changed"
           : impacted

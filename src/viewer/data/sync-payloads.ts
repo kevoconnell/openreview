@@ -6,6 +6,7 @@ import {
   resolveReviewCompare,
   type TReviewCompare,
 } from "../../schemas/review-range.js";
+import { getReviewOutputDirName } from "../../config/review-scope.js";
 import {
   getPrimaryRepoPartIdForPath,
   REPO_PARTS_BY_ID,
@@ -594,6 +595,8 @@ export async function syncViewerPayloads({
       const nextPayload: TViewerPayload = {
         ...existingPayload,
         pageType: "overview",
+        reviewScope:
+          outputDirName === getReviewOutputDirName("repo") ? "repo" : "branch",
         worktreePath: repoPath,
         generatedAt,
         statusText: buildStatusText(generatedAt),

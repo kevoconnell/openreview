@@ -1,11 +1,13 @@
 # openreview
 
-`openreview` generates a repo review for a local project using OpenCode, then writes the results to `.openreview/`.
+`openreview` generates a repo review for a local project using OpenCode, then writes branch reviews to `.openreview/` and whole-repo reviews to `.openreview-repo/`.
 
 ## What you get
 
 - a review overview at `.openreview/overview.md`
 - per-file insights at `.openreview/file-insights.json`
+- a whole-repo review overview at `.openreview-repo/overview.md`
+- whole-repo per-file insights at `.openreview-repo/file-insights.json`
 - a CLI for generating, refreshing, and opening review output
 - a TypeScript API with `generateReview()` as the main entrypoint
 
@@ -36,6 +38,7 @@ Useful commands:
 openreview                # generate if needed, then open the overview
 openreview refresh        # regenerate review output
 openreview generate       # generate review output and print paths
+openreview generate --whole-repo
 openreview status         # show whether review files already exist
 openreview show-overview  # open the generated overview
 openreview show-doc <file>
@@ -46,18 +49,24 @@ Useful flags:
 ```bash
 --local <path>        # review a different local repo
 --incremental         # request an incremental review
+--whole-repo          # review the whole repository interface surface
 ```
+
+`--whole-repo` cannot be combined with `--incremental`.
 
 When launched through a package script, `openreview` uses the directory it was originally invoked from.
 
 ## Output
 
-All generated files are written to `.openreview/` inside the repo being reviewed.
+Branch review output is written to `.openreview/`.
+Whole-repo interface review output is written to `.openreview-repo/`.
 
 Primary files:
 
 - `.openreview/overview.md`
 - `.openreview/file-insights.json`
+- `.openreview-repo/overview.md`
+- `.openreview-repo/file-insights.json`
 
 ## Library usage
 
@@ -67,6 +76,7 @@ import { generateReview } from "openreview"
 const result = await generateReview({
   repoPath: "/path/to/repo",
   mode: "full",
+  scope: "repo",
 })
 ```
 

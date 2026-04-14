@@ -94,6 +94,43 @@
   position: relative;
 }
 
+.git-review-scope-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.16);
+}
+
+.git-review-scope-button {
+  min-width: 0;
+  padding-inline: 14px;
+  border-radius: 12px;
+}
+
+.git-review-scope-button.active {
+  background: rgba(37, 99, 235, 0.22);
+  border-color: rgba(96, 165, 250, 0.5);
+}
+
+.git-review-scope-copy,
+.git-review-scope-note {
+  color: #9fb2ca;
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.git-review-scope-copy {
+  align-self: center;
+}
+
+.git-review-scope-note {
+  max-width: 26rem;
+  text-align: right;
+}
+
 .git-review-select {
   min-width: 220px;
   max-width: min(320px, calc(100vw - 40px));
@@ -185,7 +222,15 @@
     flex-wrap: wrap;
   }
 
+  .git-review-left {
+    flex-wrap: wrap;
+  }
+
   .git-review-right {
     width: 100%;
+  }
+
+  .git-review-scope-note {
+    text-align: left;
   }
 }

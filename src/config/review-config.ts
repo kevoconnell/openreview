@@ -1,3 +1,5 @@
+import { DEFAULT_REVIEW_SCOPE, getReviewOutputDirName, type TReviewScope } from "./review-scope.js";
+
 export type TReviewModel = {
   providerID: string
   modelID: string
@@ -17,14 +19,17 @@ export const DEFAULT_REVIEW_CONFIG: TReviewConfig = {
     providerID: process.env.OPENREVIEW_PROVIDER_ID ?? "openai",
     modelID: process.env.OPENREVIEW_MODEL_ID ?? "gpt-5.4",
   },
-  outputDirName: ".openreview",
+  outputDirName: getReviewOutputDirName(DEFAULT_REVIEW_SCOPE),
 }
 
-export function resolveReviewConfig(partial: Partial<TReviewConfig> = {}): TReviewConfig {
+export function resolveReviewConfig(
+  partial: Partial<TReviewConfig> = {},
+  scope: TReviewScope = DEFAULT_REVIEW_SCOPE,
+): TReviewConfig {
   return {
     baseUrl: partial.baseUrl ?? DEFAULT_REVIEW_CONFIG.baseUrl,
     agent: partial.agent ?? DEFAULT_REVIEW_CONFIG.agent,
     model: partial.model ?? DEFAULT_REVIEW_CONFIG.model,
-    outputDirName: partial.outputDirName ?? DEFAULT_REVIEW_CONFIG.outputDirName,
+    outputDirName: partial.outputDirName ?? getReviewOutputDirName(scope),
   }
 }
