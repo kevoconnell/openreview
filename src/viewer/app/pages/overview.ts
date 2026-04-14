@@ -35,6 +35,7 @@ import {
   ConsumerDetailsPanel,
   InterfaceDetailsPanel,
   OverviewReviewPanel,
+  ProviderDetailsPanel,
   RepoPartDetailsPanel,
 } from "./overview-panels";
 
@@ -814,6 +815,9 @@ function OverviewGraphPage({
     }
 
     const activeIssuePath = activeIssue.contract?.path ?? activeIssue.path;
+    if (typeof activeIssuePath !== "string" || !activeIssuePath.trim()) {
+      return [];
+    }
 
     return (activeComparison.files ?? [])
       .filter((file) => file.path !== activeIssuePath)
@@ -1294,12 +1298,7 @@ function OverviewGraphPage({
                 issue=${activeIssue}
                 fixPrompt=${fixPrompt}
                 setFixPrompt=${setFixPrompt}
-                compareBranch=${compareBranch}
-                currentBranch=${currentBranchName}
-                activeComparison=${activeComparison}
-                issueDiffFile=${activeIssueDiffFile}
-                relatedFiles=${activeIssueRelatedFiles}
-                viewerControl=${viewerControl}
+                worktreePath=${payload.worktreePath}
                 onClose=${() => setActiveIssueId(null)}
               />`
             : focusedNode?.nodeKind === "interface"
@@ -1314,7 +1313,19 @@ function OverviewGraphPage({
                 onSelectIssue=${handleSelectIssue}
                 worktreePath=${payload.worktreePath}
               />`
-            : focusedNode?.nodeKind === "consumer"
+            : focusedNode?.nodeKind === "provider"
+              ? html`<${ProviderDetailsPanel}
+                  node=${focusedNode}
+                  interfaceItems=${changedInterfacesByProviderPath[
+                    focusedNode.path
+                  ] ?? []}
+                  findings=${issuesByNodeId[focusedNode.id] ?? []}
+                  selectedIssue=${activeIssue}
+                  onSelectNode=${handleSelectNode}
+                  onSelectIssue=${handleSelectIssue}
+                  worktreePath=${payload.worktreePath}
+                />`
+              : focusedNode?.nodeKind === "consumer"
                 ? html`<${ConsumerDetailsPanel}
                     node=${focusedNode}
                     interfaceItems=${changedInterfacesByConsumerPath[

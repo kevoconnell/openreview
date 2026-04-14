@@ -15,43 +15,10 @@ import {
   InspectorPill,
   InterfaceSuggestionCard,
 } from "./findings";
+import { renderOpenInCursorLink } from "./cursor-link";
 import { PromptSuggestionCard } from "./review-controls";
 
 const html = htm.bind(createElement);
-
-function CursorLogo() {
-  return html`<svg
-    viewBox="0 0 32 32"
-    width="16"
-    height="16"
-    aria-hidden="true"
-    focusable="false"
-    className="inspector-cursor-link-logo"
-  >
-    <path
-      fill="currentColor"
-      fillRule="evenodd"
-      d="m16 30l12-20v14zM4 10l12-8l12 8zm0 0l12 6v14L4 24z"
-    />
-  </svg>`;
-}
-
-function renderOpenInCursorLink(value, worktreePath) {
-  const codeLocation = parseCodeLocation(value ?? "", worktreePath);
-  if (!codeLocation) {
-    return null;
-  }
-
-  return html`<a
-    className="inspector-cursor-link"
-    href=${codeLocation.cursorUrl}
-    aria-label=${`Open ${codeLocation.label} in Cursor`}
-    title=${`Open ${codeLocation.label} in Cursor`}
-  >
-    <${CursorLogo} />
-    <span>Open in Cursor</span>
-  </a>`;
-}
 
 function renderSourceOfTruthMeta(entity, worktreePath) {
   const sourceOfTruthPath = entity?.sourceOfTruthPath ?? entity?.path;
