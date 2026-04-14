@@ -21,6 +21,8 @@ export type TRepoSnapshot = {
   readme: string | null
   packageJson: string | null
   branch: string | null
+  compareBaseBranch: string | null
+  compareHeadBranch: string | null
   gitStatusSummary: string | null
   recentCommits: string[]
   fileTree: string[]
@@ -296,11 +298,17 @@ async function buildImportGraph({
 
 async function collectChangedFiles({
   repoPath,
+  baseBranch,
+  headBranch,
 }: {
   repoPath: string
+  baseBranch?: string | null
+  headBranch?: string | null
 }): Promise<Map<string, string>> {
   const changedStatuses = new Map<string, string>()
   const statusOutput = await runGit(repoPath, ["status", "--short"])
+  const resolvedBaseBranch = typeof baseBranch === "string" && baseBranch.trim() ? baseBranch.trim() : null
+  const resolvedHeadBranch = typeof headBranch === "string" && headBranch.trim() ? headBranch.trim() : "HEAD"
 
   for (const line of (statusOutput ?? "").split("\n")) {
     const trimmed = line.trim()
@@ -313,10 +321,10 @@ async function collectChangedFiles({
     }
   }
 
-  const diffBaseCandidates = ["origin/main", "main", "HEAD~1"]
+  const diffBaseCandidates = resolvedBaseBranch ? [resolvedBaseBranch] : ["origin/main", "main", "HEAD~1"]
   for (const candidate of diffBaseCandidates) {
-    const diffOutput = await runGit(repoPath, ["diff", "--name-status", `${candidate}...HEAD`])
-    if (!diffOutput) continue
+    const diffOutput = await runGit(repoPath, ["diff", "--name-status", `${candidate}...${resolvedHeadBranch}`])
+    if (diffOutput === null) continue
 
     for (const line of diffOutput.split("\n")) {
       const [rawStatus, ...rawPathParts] = line.trim().split(/\s+/)
@@ -396,9 +404,13 @@ function collectImpactedFiles({
 export async function collectRepoSnapshot({
   repoPath,
   fileLimit = MAX_FILE_TREE_ENTRIES,
+  baseBranch,
+  headBranch,
 }: {
   repoPath: string
   fileLimit?: number
+  baseBranch?: string | null
+  headBranch?: string | null
 }): Promise<TRepoSnapshot> {
   const resolvedRepoPath = path.resolve(repoPath)
   if (!(await safeStat(resolvedRepoPath))) {
@@ -415,7 +427,15 @@ export async function collectRepoSnapshot({
   const branch = await runGit(resolvedRepoPath, ["branch", "--show-current"])
   const recentCommitsRaw = await runGit(resolvedRepoPath, ["log", "--format=%h %s", "-5"])
   const recentCommits = recentCommitsRaw ? recentCommitsRaw.split("\n").filter(Boolean) : []
-  const changedStatuses = await collectChangedFiles({ repoPath: resolvedRepoPath })
+  const resolvedBaseBranch = typeof baseBranch === "string" && baseBranch.trim() ? baseBranch.trim() : null
+  const resolvedHeadBranch = typeof headBranch === "string" && headBranch.trim()
+    ? headBranch.trim()
+    : branch?.trim() || null
+  const changedStatuses = await collectChangedFiles({
+    repoPath: resolvedRepoPath,
+    baseBranch: resolvedBaseBranch,
+    headBranch: resolvedHeadBranch,
+  })
   const graph = await buildImportGraph({ repoPath: resolvedRepoPath, fileTree })
   const impactedFiles = collectImpactedFiles({
     fileTree,
@@ -468,6 +488,8 @@ export async function collectRepoSnapshot({
     readme: trimText(await safeReadText(readmePath), MAX_README_LENGTH),
     packageJson: trimText(await safeReadText(packageJsonPath), MAX_PACKAGE_JSON_LENGTH),
     branch: branch || null,
+    compareBaseBranch: resolvedBaseBranch,
+    compareHeadBranch: resolvedHeadBranch,
     gitStatusSummary,
     recentCommits,
     fileTree,

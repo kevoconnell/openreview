@@ -17,6 +17,9 @@ export function buildReviewPrompt({
     "Return structured JSON only.",
     "Use git and targeted file reads as needed to understand the relevant code changes.",
     "The output must include an overview and file insights.",
+    snapshot.compareBaseBranch
+      ? `Use ${snapshot.compareBaseBranch} as the review base and ${snapshot.compareHeadBranch ?? snapshot.branch ?? "HEAD"} as the review head when reasoning about branch changes.`
+      : "",
     "This is not a bug-finding pass. Focus on interfaces that future contributors can extend, reuse, and understand quickly.",
     "Review code interfaces for functions and shared callable entrypoints.",
     "Review only actual code files in this branch. Ignore package.json, lockfiles, README, tsconfig, generated output, test-only files, and config-only files unless they directly change a callable function interface.",

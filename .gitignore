@@ -8,4 +8,4 @@ runtime/
 coverage/
 *.log
 *.tsbuildinfo
-src/viewer/viewer-app.bundle.js
+src/viewer/assets/viewer-app.bundle.js

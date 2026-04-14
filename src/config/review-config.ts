@@ -12,7 +12,7 @@ export type TReviewConfig = {
 
 export const DEFAULT_REVIEW_CONFIG: TReviewConfig = {
   baseUrl: process.env.OPENCODE_BASE_URL ?? "http://127.0.0.1:4096",
-  agent: process.env.OPENREVIEW_AGENT ?? "build",
+  agent: process.env.OPENREVIEW_AGENT ?? "orchestrator",
   model: {
     providerID: process.env.OPENREVIEW_PROVIDER_ID ?? "openai",
     modelID: process.env.OPENREVIEW_MODEL_ID ?? "gpt-5.4",

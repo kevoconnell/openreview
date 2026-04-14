@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && npm run build:viewer",
-    "build:viewer": "tsx src/viewer/build-viewer-bundle.ts",
+    "build:viewer": "tsx src/viewer/build/bundle.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "openreview": "tsx src/cli/openreview.ts"
   },

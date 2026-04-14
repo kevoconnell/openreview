@@ -19,7 +19,7 @@ import {
   writeDebugArtifact,
   type TArtifactPaths,
 } from "../outputs/write-artifacts.js";
-import { syncCheckedInViewerAssets } from "../viewer/sync-viewer-assets.js";
+import { syncCheckedInViewerAssets } from "../viewer/build/sync-assets.js";
 
 export type TGenerateReviewResult = TArtifactPaths & {
   review: TReviewDocument;
@@ -32,12 +32,16 @@ export async function generateReview({
   repoPath,
   mode = "full",
   config,
+  baseBranch,
+  headBranch,
   promptHint = process.env.OPENREVIEW_PROMPT_HINT ?? "",
   signal,
 }: {
   repoPath: string;
   mode?: TGenerateReviewMode;
   config?: Partial<TReviewConfig>;
+  baseBranch?: string | null;
+  headBranch?: string | null;
   promptHint?: string;
   signal?: AbortSignal;
 }): Promise<TGenerateReviewResult> {
@@ -52,7 +56,11 @@ export async function generateReview({
     ...config,
     baseUrl,
   });
-  const snapshot = await collectRepoSnapshot({ repoPath: resolvedRepoPath });
+  const snapshot = await collectRepoSnapshot({
+    repoPath: resolvedRepoPath,
+    ...(baseBranch !== undefined ? { baseBranch } : {}),
+    ...(headBranch !== undefined ? { headBranch } : {}),
+  });
   const prompt = buildReviewPrompt({ snapshot });
   const promptText = [
     mode === "incremental"

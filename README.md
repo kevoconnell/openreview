@@ -73,7 +73,7 @@ const result = await generateReview({
 ## Defaults
 
 - OpenCode base URL: `http://127.0.0.1:4096`
-- agent: `build`
+- agent: `orchestrator`
 - model: `openai/gpt-5.4`
 
 OpenCode transport details stay inside `src/opencode/`, and the filesystem is the system of record for generated review output.

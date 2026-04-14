@@ -7,9 +7,9 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { generateReview } from "../index.js";
 import { DEFAULT_REVIEW_CONFIG } from "../config/review-config.js";
-import { ensureViewerControlServer } from "../viewer/control-server.js";
-import { syncViewerPayloads } from "../viewer/payload.js";
-import { syncCheckedInViewerAssets } from "../viewer/sync-viewer-assets.js";
+import { ensureViewerControlServer } from "../viewer/server/control-server.js";
+import { syncViewerPayloads } from "../viewer/data/sync-payloads.js";
+import { syncCheckedInViewerAssets } from "../viewer/build/sync-assets.js";
 
 type TReviewIntent = "full" | "incremental";
 
