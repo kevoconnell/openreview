@@ -14,7 +14,14 @@ async function pathExists(targetPath: string): Promise<boolean> {
 
 function getViewerAssetDirCandidates(): string[] {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  return [path.resolve(moduleDir, "../assets")];
+  return Array.from(
+    new Set([
+      path.resolve(moduleDir, "../assets"),
+      ...(moduleDir.includes(`${path.sep}dist${path.sep}`)
+        ? [path.resolve(moduleDir, "../../src/viewer/assets")]
+        : []),
+    ]),
+  );
 }
 
 async function readViewerAppJs(): Promise<string> {
@@ -30,15 +37,15 @@ async function readViewerAppJs(): Promise<string> {
   return ensureViewerBundle();
 }
 
-async function getViewerOverridesSourcePath(): Promise<string> {
+async function readViewerOverridesCss(): Promise<string> {
   for (const candidate of getViewerAssetDirCandidates()) {
     const viewerOverridesSourcePath = path.join(candidate, "viewer-overrides.css");
     if (await pathExists(viewerOverridesSourcePath)) {
-      return viewerOverridesSourcePath;
+      return fs.readFile(viewerOverridesSourcePath, "utf8");
     }
   }
 
-  throw new Error("Could not locate checked-in OpenReview viewer CSS assets");
+  return "";
 }
 
 function getViewerRuntimeRoot({
@@ -580,6 +587,51 @@ function buildViewerHtmlTemplate({ title }: { title: string }): string {
         line-height: 1.6;
       }
 
+      .inspector-action-row {
+        margin-top: 10px;
+      }
+
+      .inspector-cursor-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(15, 23, 42, 0.7);
+        color: var(--muted-strong);
+        text-decoration: none;
+        font-size: 0.83rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        transition:
+          color 140ms ease,
+          background 140ms ease,
+          border-color 140ms ease,
+          transform 140ms ease,
+          box-shadow 140ms ease;
+      }
+
+      .inspector-cursor-link:hover {
+        color: var(--text);
+        border-color: rgba(125, 211, 252, 0.3);
+        background: rgba(30, 41, 59, 0.94);
+        box-shadow: 0 10px 24px rgba(2, 6, 23, 0.22);
+        transform: translateY(-1px);
+      }
+
+      .inspector-cursor-link:focus-visible {
+        outline: 2px solid rgba(125, 211, 252, 0.88);
+        outline-offset: 2px;
+      }
+
+      .inspector-cursor-link-logo {
+        width: 15px;
+        height: 15px;
+        flex: 0 0 auto;
+      }
+
       .status-page,
       .status-shell {
         display: grid;
@@ -737,16 +789,34 @@ function buildViewerHtmlTemplate({ title }: { title: string }): string {
         }
       }
     </style>
-    <link rel="stylesheet" href="./viewer-overrides.css" />
   </head>
   <body>
     <div id="viewer-root"></div>
     <script id="viewer-data" type="application/json">{}</script>
     <script>
+      const resolveAssetHref = (src) => {
+        const pageUrl = new URL(window.location.href);
+        const version = pageUrl.searchParams.get("v");
+        if (!version) return src;
+        const separator = src.includes("?") ? "&" : "?";
+        return src + separator + "v=" + encodeURIComponent(version);
+      };
+
+      const loadOptionalStylesheet = (href) => {
+        return new Promise((resolve) => {
+          const link = document.createElement("link");
+          link.rel = "stylesheet";
+          link.href = href;
+          link.onload = () => resolve();
+          link.onerror = () => resolve();
+          document.head.appendChild(link);
+        });
+      };
+
       const loadOptionalScript = (src) => {
         return new Promise((resolve) => {
           const script = document.createElement("script");
-          script.src = src;
+          script.src = resolveAssetHref(src);
           script.async = false;
           script.crossOrigin = "anonymous";
           script.onload = () => resolve();
@@ -758,7 +828,7 @@ function buildViewerHtmlTemplate({ title }: { title: string }): string {
       const loadViewerApp = () => {
         return new Promise((resolve, reject) => {
           const viewerScript = document.createElement("script");
-          viewerScript.src = "./viewer-app.js";
+          viewerScript.src = resolveAssetHref("./viewer-app.js");
           viewerScript.onload = () => resolve();
           viewerScript.onerror = () => reject(new Error("Failed to load viewer runtime."));
           document.body.appendChild(viewerScript);
@@ -773,6 +843,7 @@ function buildViewerHtmlTemplate({ title }: { title: string }): string {
 
       void (async () => {
         try {
+          await loadOptionalStylesheet(resolveAssetHref("./viewer-overrides.css"));
           await loadOptionalScript("https://unpkg.com/react-grab/dist/index.global.js");
           await loadViewerApp();
         } catch (error) {
@@ -833,9 +904,9 @@ export async function syncCheckedInViewerAssets({
     ? discoveredWorkspaceDirs
     : [getDefaultViewerWorkspaceDir({ repoPath, outputDirName })];
 
-  const [viewerAppJs, viewerOverridesSourcePath] = await Promise.all([
+  const [viewerAppJs, viewerOverridesCss] = await Promise.all([
     readViewerAppJs(),
-    getViewerOverridesSourcePath(),
+    readViewerOverridesCss(),
   ]);
 
   await Promise.all(
@@ -848,9 +919,10 @@ export async function syncCheckedInViewerAssets({
   await Promise.all(
     workspaceDirs.flatMap((workspaceDir) => [
       fs.writeFile(path.join(workspaceDir, "viewer-app.js"), viewerAppJs),
-      fs.copyFile(
-        viewerOverridesSourcePath,
+      fs.writeFile(
         path.join(workspaceDir, "viewer-overrides.css"),
+        viewerOverridesCss,
+        "utf8",
       ),
       fs.writeFile(path.join(workspaceDir, "index.html"), indexHtml, "utf8"),
       fs.writeFile(path.join(workspaceDir, "overview.html"), indexHtml, "utf8"),

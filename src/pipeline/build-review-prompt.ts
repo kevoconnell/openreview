@@ -5,34 +5,84 @@ export function buildReviewPrompt({
 }: {
   snapshot: TRepoSnapshot;
 }): string {
-  const changedCodeFiles = snapshot.files
+  const hasWorktreeChanges = Boolean(snapshot.gitStatusSummary?.trim());
+  const worktreeStatusLines = (snapshot.gitStatusSummary ?? "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .slice(0, 20);
+  const changedCodeFiles = snapshot.changedFiles.map((filePath) => `- ${filePath}`);
+  const affectedCodeFiles = snapshot.impactedFiles.map((filePath) => `- ${filePath}`);
+  const downstreamConsumers = snapshot.files.reduce(
+    (acc, file) => {
+      if (!Array.isArray(file.impactSources) || !file.impactSources.length) {
+        return acc;
+      }
+
+      for (const impactSource of file.impactSources) {
+        if (!acc.has(impactSource)) {
+          acc.set(impactSource, []);
+        }
+        acc.get(impactSource)?.push(file.path);
+      }
+
+      return acc;
+    },
+    new Map<string, string[]>(),
+  );
+  const changedConsumerContext = snapshot.files
     .filter((file) => file.state === "changed")
-    .map((file) => `- ${file.path}`);
-  const affectedCodeFiles = snapshot.files
-    .filter((file) => file.state === "affected")
-    .map((file) => `- ${file.path}`);
+    .map((file) => {
+      const consumers = [...new Set(downstreamConsumers.get(file.path) ?? [])].sort();
+      return {
+        path: file.path,
+        consumers,
+      };
+    })
+    .filter((entry) => entry.consumers.length > 0)
+    .map(
+      (entry) =>
+        `- ${entry.path} → ${entry.consumers.slice(0, 6).join(", ")}${entry.consumers.length > 6 ? `, +${entry.consumers.length - 6} more` : ""}`,
+    );
 
   return [
     `Review the repository ${snapshot.repoName}.`,
     "Return structured JSON only.",
     "Use git and targeted file reads as needed to understand the relevant code changes.",
     "The output must include an overview and file insights.",
-    snapshot.compareBaseBranch
-      ? `Use ${snapshot.compareBaseBranch} as the review base and ${snapshot.compareHeadBranch ?? snapshot.branch ?? "HEAD"} as the review head when reasoning about branch changes.`
+    snapshot.compare.baseBranch
+      ? hasWorktreeChanges
+        ? `Use ${snapshot.compare.baseBranch} as the review base and ${snapshot.compare.headBranch ?? "HEAD"} as the effective review head so uncommitted worktree changes are included in the diff context.`
+        : `Use ${snapshot.compare.baseBranch} as the review base and ${snapshot.compare.headBranch ?? "HEAD"} as the review head when reasoning about branch changes.`
+      : "",
+    hasWorktreeChanges
+      ? "This review also includes uncommitted worktree changes. Do not report 'no changes' just because the named branches match; review the changed files and git status below as in-scope code changes."
       : "",
     "This is not a bug-finding pass. Focus on interfaces that future contributors can extend, reuse, and understand quickly.",
-    "Review code interfaces for functions and shared callable entrypoints.",
+    "Use a consumer-first lens: prioritize what downstream callers, importers, routes, jobs, services, or UI surfaces have to know when these interfaces change.",
+    "Review code interfaces for functions, class methods, and shared callable entrypoints.",
     "Review only actual code files in this branch. Ignore package.json, lockfiles, README, tsconfig, generated output, test-only files, and config-only files unless they directly change a callable function interface.",
     changedCodeFiles.length > 0
       ? ["Changed code files in scope:", ...changedCodeFiles].join("\n")
       : "Changed code files in scope: none identified.",
+    worktreeStatusLines.length > 0
+      ? ["Git status summary for in-progress work:", ...worktreeStatusLines].join(
+          "\n",
+        )
+      : "",
     affectedCodeFiles.length > 0
       ? ["Affected code files for caller context:", ...affectedCodeFiles].join(
           "\n",
         )
       : "",
+    changedConsumerContext.length > 0
+      ? [
+          "Known downstream consumers for changed files:",
+          ...changedConsumerContext,
+        ].join("\n")
+      : "",
     "Focus only on functions whose callable interface changed on this branch.",
-    "Only report functions that are exported, consumed by other files, or otherwise act as shared entrypoints. Ignore internal helpers unless they are directly imported elsewhere.",
+    "Only report functions or class methods that are exported, consumed by other files, instantiated through shared classes, or otherwise act as shared entrypoints. Ignore internal helpers unless they are directly imported or called from outside their owning module/class boundary.",
     "A changed signature includes changed parameters, changed parameter meaning, changed return shape, changed side-effect contract, or changed required call order visible to callers.",
     "If a function's implementation changed but callers still use it the same way, do not report it.",
     "Use these interface principles: name by intent, keep parameter lists short, avoid flag arguments, make side effects obvious, separate distinct behaviors, prefer explicit types over primitive soup, return the main result callers need, avoid provider-specific interface leakage, prefer rigid API layers, remove hardcoded type-specific behavior from shared entrypoints, and make extension paths obvious without overengineering one-off registries.",
@@ -40,6 +90,12 @@ export function buildReviewPrompt({
     "Bias toward the simplest consumer model: the best interface is often 'call one function' rather than 'choose among several overlapping methods'.",
     "Treat this as a core question in every finding: 'Are these separate methods actually different jobs, or are they just four ways to do the same thing?' If they are the same job, recommend one function.",
     "A good better-interface suggestion should help a future contributor add a new capability, provider, kind, or caller without rewriting existing call sites.",
+    "When known consumers exist, name them explicitly in callerImpact or consumerImpact instead of speaking about callers in the abstract.",
+    "Prefer findings that reduce consumer decision-making, consumer branching, and consumer-specific workaround code.",
+    "Treat shared-consumer overlap as a strong combine signal: if the same 2 or more consumers depend on multiple sibling functions that appear to serve one job, explicitly evaluate whether those functions should collapse into one consumer-facing entrypoint.",
+    "If consumers have to choose among overlapping methods in the same module, call that out directly as interface sprawl.",
+    "If this branch adds a new function or method, explicitly check whether it should instead extend, rename, or slightly reshape an existing nearby entrypoint rather than creating one more variant.",
+    "Bias against additive near-duplicates: prefer modifying an existing class method or function when it already serves the same consumer job with only minor variation.",
     "Only return the highest-leverage results. Fewer, better insights are preferred over broad coverage.",
     "For each important changed function, structure the reasoning as: old interface -> current interface -> should this combine with sibling entrypoints? -> 2-3 better interface options, with migration notes for callers.",
     "Each better interface must be concrete: name the exact function, the current signature or callable shape, and a better signature or split.",

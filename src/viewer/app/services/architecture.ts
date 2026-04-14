@@ -321,7 +321,7 @@ export function resolveCompareBranches({
       ? reviewDiff.compareOptions
       : []),
     ...Object.keys(reviewDiff?.comparisons ?? {}),
-    reviewDiff?.baseLabel,
+    reviewDiff?.compare?.baseBranch,
   ]
     .map((option) => String(option ?? "").trim())
     .filter(
@@ -345,8 +345,8 @@ export function resolveCompareBranches({
     return left.localeCompare(right);
   });
 
-  const options = sortedOptions.length || !currentBranch ? sortedOptions : [currentBranch];
-  const fallbackBranch = String(reviewDiff?.baseLabel ?? "").trim();
+  const options = sortedOptions;
+  const fallbackBranch = String(reviewDiff?.compare?.baseBranch ?? "").trim();
   const preferred = options.includes("main")
     ? "main"
     : fallbackBranch && options.includes(fallbackBranch)

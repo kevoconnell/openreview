@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -9,16 +9,24 @@ import { resolveReviewConfig } from "../../config/review-config.js";
 import { runOpenCodePrompt } from "../../opencode/review-client.js";
 import { ensureRepoOpenCodeServer, resolveRepoRoot } from "../../opencode/server.js";
 import { generateReview } from "../../pipeline/generate-review.js";
+import {
+  normalizeReviewCompare,
+  type TReviewCompare,
+} from "../../schemas/review-range.js";
 import { syncCheckedInViewerAssets } from "../build/sync-assets.js";
 import { syncViewerPayloads } from "../data/sync-payloads.js";
 
 type TViewerControlServerState = {
+  codeVersion?: string;
+  serverVersion?: number;
   pid: number | null;
   port: number;
   repoPath: string;
   outputDirName: string;
   startedAt: string;
 };
+
+const VIEWER_CONTROL_SERVER_VERSION = 2;
 
 function getRuntimeDir({
   repoPath,
@@ -50,6 +58,53 @@ async function pathExists(targetPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function resolveViewerControlCodeVersion({
+  moduleDir,
+}: {
+  moduleDir: string;
+}): Promise<string> {
+  const repoRoot = path.resolve(moduleDir, "../../..");
+  const candidateGroups = [
+    [
+      "src/viewer/server/control-server.ts",
+      "dist/viewer/server/control-server.js",
+    ],
+    [
+      "src/viewer/server/run-control-server.ts",
+      "dist/viewer/server/run-control-server.js",
+    ],
+    ["src/pipeline/generate-review.ts", "dist/pipeline/generate-review.js"],
+    [
+      "src/collectors/repo-snapshot.ts",
+      "dist/collectors/repo-snapshot.js",
+    ],
+    [
+      "src/pipeline/build-review-prompt.ts",
+      "dist/pipeline/build-review-prompt.js",
+    ],
+  ];
+
+  const signatures: string[] = [];
+  for (const candidates of candidateGroups) {
+    for (const relativePath of candidates) {
+      const absolutePath = path.join(repoRoot, relativePath);
+      if (!(await pathExists(absolutePath))) {
+        continue;
+      }
+
+      const stat = await fs.stat(absolutePath);
+      signatures.push(
+        `${relativePath}:${stat.size}:${Math.trunc(stat.mtimeMs)}`,
+      );
+      break;
+    }
+  }
+
+  return createHash("sha1")
+    .update(`${VIEWER_CONTROL_SERVER_VERSION}\n${signatures.join("\n")}`)
+    .digest("hex");
 }
 
 async function readServerState({
@@ -190,9 +245,9 @@ async function resolveControlServerRunner({
   const localJsRunnerPath = path.join(moduleDir, "run-control-server.js");
   const distJsRunnerPath = path.resolve(
     moduleDir,
-    "../../dist/viewer/server/run-control-server.js",
+    "../../../dist/viewer/server/run-control-server.js",
   );
-  const tsxPath = path.resolve(moduleDir, "../../node_modules/.bin/tsx");
+  const tsxPath = path.resolve(moduleDir, "../../../node_modules/.bin/tsx");
 
   if ((await pathExists(tsRunnerPath)) && (await pathExists(tsxPath))) {
     return {
@@ -244,8 +299,12 @@ export async function ensureViewerControlServer({
   repoPath: string;
   outputDirName?: string;
 }): Promise<number> {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const codeVersion = await resolveViewerControlCodeVersion({ moduleDir });
   const existingState = await readServerState({ repoPath, outputDirName });
   if (
+    existingState?.serverVersion === VIEWER_CONTROL_SERVER_VERSION &&
+    existingState?.codeVersion === codeVersion &&
     existingState?.repoPath === repoPath &&
     existingState.outputDirName === outputDirName &&
     (await isHealthy(existingState.port)) &&
@@ -261,7 +320,6 @@ export async function ensureViewerControlServer({
   await fs.mkdir(runtimeDir, { recursive: true });
   const logPath = path.join(runtimeDir, "viewer-control-server.log");
   await fs.writeFile(logPath, "", "utf8");
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const { runnerExecutable, runnerScriptPath } =
     await resolveControlServerRunner({ moduleDir });
   const launchCommand = [
@@ -300,6 +358,8 @@ export async function ensureViewerControlServer({
         repoPath,
         outputDirName,
         state: {
+          codeVersion,
+          serverVersion: VIEWER_CONTROL_SERVER_VERSION,
           pid: Number.isFinite(pid) ? pid : null,
           port,
           repoPath,
@@ -410,24 +470,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeOptionalBranchName(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
+type TViewerRefreshMode = "full" | "incremental";
+
+type TViewerRefreshRequest = {
+  mode: TViewerRefreshMode;
+  compare?: TReviewCompare;
+};
+
+function normalizeViewerRefreshMode(
+  value: unknown,
+): TViewerRefreshMode | null {
+  if (value === "full" || value === "hard-reset") {
+    return "full";
+  }
+
+  if (value === "incremental" || value === "reexamine") {
+    return "incremental";
+  }
+
+  return null;
 }
 
-function parseReexamineRequest(body: unknown): {
-  baseBranch: string | null;
-  headBranch: string | null;
-} {
+function parseRefreshRequest(body: unknown): TViewerRefreshRequest | null {
   if (!isRecord(body)) {
-    return {
-      baseBranch: null,
-      headBranch: null,
-    };
+    return null;
+  }
+
+  const mode = normalizeViewerRefreshMode(body.mode);
+  if (!mode) {
+    return null;
   }
 
   return {
-    baseBranch: normalizeOptionalBranchName(body.baseBranch),
-    headBranch: normalizeOptionalBranchName(body.headBranch ?? body.compareBranch),
+    mode,
+    ...(Object.hasOwn(body, "compare")
+      ? {
+          compare: normalizeReviewCompare(
+            isRecord(body.compare)
+              ? body.compare
+              : {
+                  baseBranch: typeof body.compare === "string" ? body.compare : null,
+                },
+          ),
+        }
+      : {}),
   };
 }
 
@@ -538,11 +624,9 @@ export async function runViewerControlServer({
   const controlToken = randomUUID();
 
   const refreshViewer = async ({
-    baseBranch,
-    headBranch,
+    compare,
   }: {
-    baseBranch?: string | null;
-    headBranch?: string | null;
+    compare?: TReviewCompare;
   } = {}): Promise<void> => {
     await syncCheckedInViewerAssets({ repoPath, outputDirName });
     await syncViewerPayloads({
@@ -550,8 +634,7 @@ export async function runViewerControlServer({
       outputDirName,
       controlPort: port,
       controlToken,
-      ...(baseBranch !== undefined ? { baseBranch } : {}),
-      ...(headBranch !== undefined ? { headBranch } : {}),
+      ...(compare !== undefined ? { compare } : {}),
     });
   };
 
@@ -613,45 +696,60 @@ export async function runViewerControlServer({
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/control/reexamine") {
+    if (request.method === "POST" && url.pathname === "/control/refresh") {
       if (!hasValidControlToken(request, controlToken)) {
         writeJson(response, 403, { error: "Missing or invalid control token." });
         return;
       }
 
-      let reexamineRequest: { baseBranch: string | null; headBranch: string | null } = {
-        baseBranch: null,
-        headBranch: null,
-      };
+      let refreshRequest: TViewerRefreshRequest | null = null;
 
       try {
-        const rawBody = await readRequestBody(request);
-        if (rawBody.trim()) {
-          reexamineRequest = parseReexamineRequest(JSON.parse(rawBody) as unknown);
-        }
+        refreshRequest = parseRefreshRequest(
+          JSON.parse(await readRequestBody(request)) as unknown,
+        );
       } catch {
         writeJson(response, 400, { error: "Invalid JSON body." });
         return;
       }
 
-      if (reexamineState === "running") {
-        writeJson(response, 202, { ok: true, queued: true });
+      if (!refreshRequest) {
+        writeJson(response, 400, {
+          error: "Expected a JSON body with mode and optional compare.",
+        });
         return;
       }
 
+      if (reexamineState === "running") {
+        if (refreshRequest.mode === "incremental") {
+          writeJson(response, 202, { ok: true, queued: true });
+          return;
+        }
+
+        writeJson(response, 409, {
+          error: "A viewer refresh is already running. Wait for it to finish and try again.",
+        });
+        return;
+      }
+
+      const reviewCompare =
+        refreshRequest.compare !== undefined
+          ? normalizeReviewCompare(refreshRequest.compare)
+          : undefined;
+
       reexamineState = "running";
       lastError = null;
-      writeJson(response, 202, { ok: true });
 
-      void (async () => {
+      const runRefresh = async () => {
         try {
           await generateReview({
             repoPath,
-            mode: "incremental",
-            baseBranch: reexamineRequest.baseBranch,
-            headBranch: reexamineRequest.headBranch,
+            mode: refreshRequest.mode,
+            ...(reviewCompare !== undefined ? { compare: reviewCompare } : {}),
           });
-          await refreshViewer(reexamineRequest);
+          await refreshViewer(
+            reviewCompare !== undefined ? { compare: reviewCompare } : undefined,
+          );
           reexamineState = "idle";
           lastError = null;
         } catch (error) {
@@ -660,39 +758,20 @@ export async function runViewerControlServer({
             error instanceof Error
               ? (error.stack ?? error.message)
               : String(error);
+          throw error;
         }
-      })();
-      return;
-    }
+      };
 
-    if (request.method === "POST" && url.pathname === "/control/hard-reset") {
-      if (!hasValidControlToken(request, controlToken)) {
-        writeJson(response, 403, { error: "Missing or invalid control token." });
+      if (refreshRequest.mode === "incremental") {
+        writeJson(response, 202, { ok: true });
+        void runRefresh().catch(() => {});
         return;
       }
-
-      await readRequestBody(request);
-
-      if (reexamineState === "running") {
-        writeJson(response, 409, {
-          error: "A viewer refresh is already running. Wait for it to finish and try again.",
-        });
-        return;
-      }
-
-      reexamineState = "running";
-      lastError = null;
 
       try {
-        await generateReview({ repoPath, mode: "full" });
-        await refreshViewer();
-        reexamineState = "idle";
-        lastError = null;
+        await runRefresh();
         writeJson(response, 200, { ok: true });
-      } catch (error) {
-        reexamineState = "error";
-        lastError =
-          error instanceof Error ? (error.stack ?? error.message) : String(error);
+      } catch {
         writeJson(response, 500, { error: lastError });
       }
       return;

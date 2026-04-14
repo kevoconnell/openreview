@@ -33,6 +33,40 @@ const SUPPORTED_COMMANDS = new Set<TNativeCommand>([
   "stop",
 ]);
 
+const HELP_TEXT = `Usage: openreview [command] [options]
+
+Commands:
+  open           Open the latest overview viewer (default)
+  generate       Generate review artifacts and sync viewer payloads
+  refresh        Regenerate review artifacts and sync viewer payloads
+  show-overview  Open the generated overview
+  show-doc       Open a document inside the review output directory
+  status         Print output and viewer status as JSON
+  service        Reserved command (not supported by native CLI)
+  stop           Reserved command (not supported by native CLI)
+
+Options:
+  --local <path>     Run against a specific repository path
+  --incremental      Use incremental review mode
+  -h, --help         Show this help text
+
+Examples:
+  openreview
+  openreview open
+  openreview generate --local ../my-repo
+  openreview refresh --incremental
+  openreview show-doc architecture.md
+  openreview status
+`;
+
+function isHelpRequest(argv: string[]): boolean {
+  return argv.includes("--help") || argv.includes("-h");
+}
+
+function printHelp(): void {
+  process.stdout.write(`${HELP_TEXT}\n`);
+}
+
 function resolveInvocationDir(): string {
   const initCwd = process.env.INIT_CWD?.trim();
   return initCwd ? path.resolve(initCwd) : process.cwd();
@@ -294,6 +328,10 @@ async function runGenerate({
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (isHelpRequest(argv)) {
+    printHelp();
+    return;
+  }
   const command = getCommand(argv);
   const commandArgs = getCommandArgs(argv, command);
   const { repoPath, mode, docFileName } = parseArgs(commandArgs);

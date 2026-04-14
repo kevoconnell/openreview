@@ -122,7 +122,7 @@ export function getIssueMarkerTitle(summary) {
     .join(" · ");
 }
 
-export function buildFindingsFromInsight({ insight, nodeLabel }) {
+export function buildStructuredInterfaceFindingsFromInsight({ insight }) {
   const normalizedInsight = normalizeInsight(insight);
   if (!normalizedInsight) {
     return [];
@@ -153,9 +153,19 @@ export function buildFindingsFromInsight({ insight, nodeLabel }) {
     });
   }
 
-  if (findings.length) {
-    return findings;
+  return findings;
+}
+
+export function buildFallbackHeuristicFindingsFromInsight({
+  insight,
+  nodeLabel,
+}) {
+  const normalizedInsight = normalizeInsight(insight);
+  if (!normalizedInsight) {
+    return [];
   }
+
+  const findings = [];
 
   for (const signal of normalizedInsight.interfaceTags ?? []) {
     findings.push({
@@ -183,6 +193,18 @@ export function buildFindingsFromInsight({ insight, nodeLabel }) {
   }
 
   return findings;
+}
+
+export function buildFindingsFromInsight({ insight, nodeLabel }) {
+  return {
+    structuredInterfaceFindings: buildStructuredInterfaceFindingsFromInsight({
+      insight,
+    }),
+    fallbackHeuristicFindings: buildFallbackHeuristicFindingsFromInsight({
+      insight,
+      nodeLabel,
+    }),
+  };
 }
 
 export function getInterfaceSuggestion(finding) {

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import htm from "htm";
 import { isCombineOpportunity } from "../services/payload";
 import {
@@ -11,6 +11,18 @@ import {
 } from "../services/review-findings";
 
 const html = htm.bind(createElement);
+
+async function copyPromptToClipboard(prompt, setCopied) {
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    }
+  } catch {
+    setCopied(false);
+  }
+}
 
 function getSimplificationStrategyLabel(value) {
   return value ? formatFindingLabel(value) : "Stabilize";
@@ -72,6 +84,7 @@ function renderInterfaceChangePreview(
 function InterfaceSuggestionCard({
   title,
   path,
+  metaContent,
   consumerLabel,
   current,
   suggestions,
@@ -82,7 +95,10 @@ function InterfaceSuggestionCard({
         <div>
           <p className="inspector-kicker">Interface improvement</p>
           <h3 className="interface-diff-title">${title}</h3>
-          <p className="interface-diff-meta">${path}</p>
+          ${metaContent ??
+          (path
+            ? html`<p className="interface-diff-meta">${path}</p>`
+            : null)}
         </div>
         ${consumerLabel
           ? html`<span className="interface-impact-badge"
@@ -135,6 +151,44 @@ function InterfaceSuggestionCard({
             </div>
           </div>`
         : null}
+    </div>
+  `;
+}
+
+function FindingPromptControls({ finding, onSelectIssue }) {
+  const [prompt, setPrompt] = useState(finding.fixPrompt ?? "");
+  const [copied, setCopied] = useState(false);
+
+  if (!String(finding?.fixPrompt ?? "").trim()) {
+    return null;
+  }
+
+  const handleCopy = async () => {
+    await copyPromptToClipboard(prompt, setCopied);
+  };
+
+  return html`
+    <div className="inspector-section">
+      <label className="issue-fixer-label">Edit improvement prompt</label>
+      <textarea
+        className="issue-fixer-textarea"
+        value=${prompt}
+        onInput=${(event) => setPrompt(event.currentTarget.value)}
+        rows=${3}
+      ></textarea>
+      <div className="inspector-action-row">
+        ${onSelectIssue
+          ? html`<button
+              className="btn-fix-primary"
+              onClick=${() => onSelectIssue(finding)}
+            >
+              Open details
+            </button>`
+          : null}
+        <button className="inspector-inline-action" onClick=${handleCopy}>
+          ${copied ? "Copied" : "Copy prompt"}
+        </button>
+      </div>
     </div>
   `;
 }
@@ -248,23 +302,19 @@ function FindingsList({ findings, onSelectIssue }) {
                             )}</code></pre>
                           </div>`
                         : null)}
-                      ${finding.whyBetter
-                        ? html`<p className="interface-change-explainer">
-                            <strong>Why this is better:</strong>
-                            ${finding.whyBetter}
-                          </p>`
-                        : null}
-                      <div className="finding-actions">
-                        <button
-                          className="finding-action-button finding-action-button-primary"
-                          onClick=${() => onSelectIssue?.(finding)}
-                        >
-                          Fix in OpenCode
-                        </button>
-                      </div>
-                    </div>
-                    ${finding.location || finding.path
-                      ? html`<span className="inspector-list-meta"
+                       ${finding.whyBetter
+                         ? html`<p className="interface-change-explainer">
+                             <strong>Why this is better:</strong>
+                             ${finding.whyBetter}
+                           </p>`
+                         : null}
+                       <${FindingPromptControls}
+                         finding=${finding}
+                         onSelectIssue=${onSelectIssue}
+                       />
+                     </div>
+                     ${finding.location || finding.path
+                       ? html`<span className="inspector-list-meta"
                           >${finding.location || finding.path}</span
                         >`
                       : null}

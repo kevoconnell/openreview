@@ -32,12 +32,14 @@ import {
 import { DocumentPage } from "./document";
 import { GitReviewTopbar, IssueFixerPanel } from "./review-controls";
 import {
+  ConsumerDetailsPanel,
   InterfaceDetailsPanel,
   OverviewReviewPanel,
   RepoPartDetailsPanel,
 } from "./overview-panels";
 
 const html = htm.bind(createElement);
+const MAX_VISIBLE_SHARED_CONSUMERS = 6;
 
 
 function OverviewGraphPage({
@@ -60,16 +62,39 @@ function OverviewGraphPage({
       }),
     [graphDocument, payload.changedInterfaces, rawFileInsights],
   );
-  const reviewDiff = payload.reviewDiff ?? { baseLabel: "", files: [] };
+  const changedInterfacesByKey = useMemo(
+    () =>
+      new Map(
+        changedInterfaces.map((item) => [`${item.path}:${item.name}`, item]),
+      ),
+    [changedInterfaces],
+  );
+  const reviewDiff = payload.reviewDiff ?? { compare: { baseBranch: "" }, files: [] };
   const reviewIssues = useMemo(
     () =>
-      Object.values(fileInsights).flatMap((insight) =>
-        buildFindingsFromInsight({
+      Object.values(fileInsights).flatMap((insight) => {
+        const {
+          structuredInterfaceFindings,
+          fallbackHeuristicFindings,
+        } = buildFindingsFromInsight({
           insight,
           nodeLabel: insight?.basename ?? insight?.path ?? "file",
-        }),
-      ),
-    [fileInsights],
+        });
+        const structuredIssues = structuredInterfaceFindings.map((issue) => ({
+          ...issue,
+          contract:
+            changedInterfacesByKey.get(
+              `${insight?.path ?? issue.path}:${issue.functionName}`,
+            ) ?? null,
+        }));
+        const fallbackIssues = fallbackHeuristicFindings.map((issue) => ({
+          ...issue,
+          contract: null,
+        }));
+
+        return structuredIssues.length ? structuredIssues : fallbackIssues;
+      }),
+    [changedInterfacesByKey, fileInsights],
   );
   const allNodes = graphDocument?.nodes ?? [];
   const nodesById = useMemo(
@@ -210,7 +235,7 @@ function OverviewGraphPage({
     direction: "right",
   });
   const branchName =
-    reviewDiff.currentBranch ??
+    reviewDiff.compare?.headBranch ??
     (() => {
       const segments = String(payload.worktreePath ?? "")
         .split("/")
@@ -287,13 +312,13 @@ function OverviewGraphPage({
     () =>
       reviewDiff.comparisons?.[compareBranch] ?? {
         files: reviewDiff.files ?? [],
-        mergeBase: reviewDiff.mergeBase ?? null,
+        mergeBase: reviewDiff.compare?.mergeBase ?? null,
       },
     [
       compareBranch,
       reviewDiff.comparisons,
       reviewDiff.files,
-      reviewDiff.mergeBase,
+      reviewDiff.compare?.mergeBase,
     ],
   );
   const interfaceGraph = useMemo(() => {
@@ -304,6 +329,9 @@ function OverviewGraphPage({
       const filesByNodeId = {};
       const primaryPathByNodeId = {};
       const summaryByNodeId = {};
+      const comparisonFilesByPath = new Map(
+        (activeComparison.files ?? []).map((file) => [file.path, file]),
+      );
 
       const groupedInterfaces = Array.from(
         changedInterfaces.slice(0, 12).reduce((map, item) => {
@@ -316,9 +344,71 @@ function OverviewGraphPage({
       let currentY = 56;
 
       groupedInterfaces.forEach(([groupPath, items]) => {
+        const sortedItems = [...items].sort((left, right) => {
+          const consumerDelta = right.consumers.length - left.consumers.length;
+          if (consumerDelta !== 0) {
+            return consumerDelta;
+          }
+
+          return String(left.name ?? "").localeCompare(String(right.name ?? ""));
+        });
+        const consumerMap = new Map();
+        for (const item of sortedItems) {
+          for (const consumer of item.consumers ?? []) {
+            if (!consumer?.path) {
+              continue;
+            }
+
+            const existing = consumerMap.get(consumer.path) ?? {
+              ...consumer,
+              interfaces: [],
+            };
+            existing.interfaces = [
+              ...new Set([...(existing.interfaces ?? []), item.name]),
+            ];
+            existing.state =
+              existing.state === "changed" || consumer.state === "changed"
+                ? "changed"
+                : consumer.state ?? existing.state ?? "affected";
+            if (
+              String(consumer.preview ?? "").length >
+              String(existing.preview ?? "").length
+            ) {
+              existing.preview = consumer.preview;
+            }
+            consumerMap.set(consumer.path, existing);
+          }
+        }
+        const sharedConsumers = Array.from(consumerMap.values()).sort(
+          (left, right) => {
+            const overlapDelta =
+              (right.interfaces?.length ?? 0) - (left.interfaces?.length ?? 0);
+            if (overlapDelta !== 0) {
+              return overlapDelta;
+            }
+
+            const leftRank = left.state === "changed" ? 0 : 1;
+            const rightRank = right.state === "changed" ? 0 : 1;
+            if (leftRank !== rightRank) {
+              return leftRank - rightRank;
+            }
+
+            return String(left.path ?? "").localeCompare(String(right.path ?? ""));
+          },
+        );
+        const visibleConsumers = sharedConsumers.slice(
+          0,
+          MAX_VISIBLE_SHARED_CONSUMERS,
+        );
+        const sharedConsumerCounts = Object.fromEntries(
+          sharedConsumers.map((consumer) => [
+            consumer.path,
+            consumer.interfaces?.length ?? 0,
+          ]),
+        );
         const providerPartId =
           getPrimaryRepoPartIdForPath(groupPath) ??
-          `part:${items[0]?.part ?? "shared"}`;
+          `part:${sortedItems[0]?.part ?? "shared"}`;
         const providerNodeId = `provider:${groupPath}`;
         const relatedFiles = (activeComparison.files ?? []).filter(
           (file) => file.path === groupPath,
@@ -326,7 +416,27 @@ function OverviewGraphPage({
         const providerFindings = reviewIssues
           .filter((issue) => issue.path === groupPath)
           .map((issue) => ({ ...issue, nodeId: providerNodeId }));
-        const groupHeight = Math.max(140, items.length * 116);
+        const interfaceStartY = currentY + 42;
+        const consumerStartY = currentY + 42;
+        const interfaceColumnHeight = sortedItems.length
+          ? (sortedItems.length - 1) * 116 + 86
+          : 0;
+        const consumerColumnHeight = visibleConsumers.length
+          ? (visibleConsumers.length - 1) * 72 + 62
+          : 0;
+        const groupHeight = Math.max(
+          148,
+          Math.max(interfaceColumnHeight, consumerColumnHeight) + 84,
+        );
+        const consumerNodeIdsByPath = Object.fromEntries(
+          visibleConsumers.map((consumer) => [
+            consumer.path,
+            `consumer:${groupPath}:${consumer.path}`,
+          ]),
+        );
+        const totalCombineSignals = sharedConsumers.filter(
+          (consumer) => (consumer.interfaces?.length ?? 0) > 1,
+        ).length;
 
         nodes.push({
           id: providerNodeId,
@@ -336,24 +446,67 @@ function OverviewGraphPage({
           role: "boundary",
           label: groupPath,
           path: groupPath,
-          description: `Defines ${items.length} shared function${items.length === 1 ? "" : "s"}`,
-          summary: `${items.length} changed function${items.length === 1 ? "" : "s"}`,
+          description: `Changed source file with ${sortedItems.length} shared interface${sortedItems.length === 1 ? "" : "s"}.`,
+          summary: `${sortedItems.length} interfaces · ${sharedConsumers.length} consumers${totalCombineSignals ? ` · ${totalCombineSignals} shared-consumer combine signal${totalCombineSignals === 1 ? "" : "s"}` : ""}`,
           state: "changed",
           position: {
             x: 56,
-            y: currentY + Math.max(0, (groupHeight - 62) / 2),
+            y: currentY + Math.max(0, (groupHeight - 72) / 2),
           },
-          size: { width: 300, height: 62 },
+          size: { width: 284, height: 72 },
         });
 
         findingsByNodeId[providerNodeId] = providerFindings;
         filesByNodeId[providerNodeId] = relatedFiles;
         primaryPathByNodeId[providerNodeId] = groupPath;
         summaryByNodeId[providerNodeId] =
-          `${items.length} changed function${items.length === 1 ? "" : "s"}`;
+          `${sortedItems.length} interfaces · ${sharedConsumers.length} consumers`;
 
-        items.forEach((item, interfaceIndex) => {
-          const interfaceY = currentY + interfaceIndex * 116;
+        visibleConsumers.forEach((consumer, consumerIndex) => {
+          const consumerNodeId = consumerNodeIdsByPath[consumer.path];
+          const consumerRelatedFiles = comparisonFilesByPath.get(consumer.path)
+            ? [comparisonFilesByPath.get(consumer.path)]
+            : [];
+          const consumerFindings = sortedItems
+            .filter((item) =>
+              item.consumers.some((candidate) => candidate.path === consumer.path),
+            )
+            .flatMap((item) =>
+              reviewIssues
+                .filter(
+                  (issue) =>
+                    issue.path === item.path &&
+                    (!issue.functionName || issue.functionName === item.name),
+                )
+                .map((issue) => ({ ...issue, nodeId: consumerNodeId })),
+            );
+
+          nodes.push({
+            id: consumerNodeId,
+            type: "group",
+            nodeKind: "consumer",
+            partId:
+              REPO_PART_IDS_BY_LABEL[String(consumer.part ?? "").toLowerCase()] ??
+              getPrimaryRepoPartIdForPath(consumer.path),
+            role: "adapter",
+            label: consumer.path,
+            path: consumer.path,
+            description: consumer.preview,
+            summary: `${consumer.interfaces?.length ?? 0} changed interface${consumer.interfaces?.length === 1 ? "" : "s"}${(consumer.interfaces?.length ?? 0) > 1 ? ` · ${consumer.interfaces.join(", ")}` : ""}`,
+            state: consumer.state === "changed" ? "changed" : "affected",
+            position: { x: 834, y: consumerStartY + consumerIndex * 72 },
+            size: { width: 352, height: 62 },
+          });
+
+          findingsByNodeId[consumerNodeId] = consumerFindings;
+          filesByNodeId[consumerNodeId] = consumerRelatedFiles;
+          primaryPathByNodeId[consumerNodeId] = consumer.path;
+          summaryByNodeId[consumerNodeId] =
+            consumer.preview || `${consumer.interfaces?.length ?? 0} changed interfaces`;
+        });
+
+        sortedItems.forEach((item, interfaceIndex) => {
+          const interfaceY = interfaceStartY + interfaceIndex * 116;
           const interfaceNodeId = `interface:${item.path}:${item.name}`;
           const relatedFindings = reviewIssues
             .filter(
@@ -362,6 +515,9 @@ function OverviewGraphPage({
                 (!issue.functionName || issue.functionName === item.name),
             )
             .map((issue) => ({ ...issue, nodeId: interfaceNodeId }));
+          const sharedConsumerCount = item.consumers.filter(
+            (consumer) => (sharedConsumerCounts[consumer.path] ?? 0) > 1,
+          ).length;
 
           nodes.push({
             id: interfaceNodeId,
@@ -373,10 +529,10 @@ function OverviewGraphPage({
             declaration: item.declaration,
             snippet: item.snippet,
             description: item.declaration,
-            summary: item.path,
+            summary: `${item.consumers.length} consumer${item.consumers.length === 1 ? "" : "s"}${sharedConsumerCount ? ` · ${sharedConsumerCount} shared with sibling interfaces` : ""}`,
             state: "changed",
-            position: { x: 404, y: interfaceY },
-            size: { width: 360, height: 86 },
+            position: { x: 372, y: interfaceY },
+            size: { width: 372, height: 86 },
           });
 
           edges.push({
@@ -384,43 +540,28 @@ function OverviewGraphPage({
             source: providerNodeId,
             target: interfaceNodeId,
             type: "structure",
-            label: "defines",
+            label: "exports",
           });
 
           findingsByNodeId[interfaceNodeId] = relatedFindings;
           filesByNodeId[interfaceNodeId] = relatedFiles;
           primaryPathByNodeId[interfaceNodeId] = item.path;
-          summaryByNodeId[interfaceNodeId] = item.path;
+          summaryByNodeId[interfaceNodeId] =
+            `${item.consumers.length} consumers${sharedConsumerCount ? ` · ${sharedConsumerCount} shared` : ""}`;
 
-          item.consumers.slice(0, 3).forEach((consumer, consumerIndex) => {
-            const consumerNodeId = `consumer:${item.path}:${item.name}:${consumer.path}`;
-            nodes.push({
-              id: consumerNodeId,
-              type: "group",
-              nodeKind: "consumer",
-              partId:
-                REPO_PART_IDS_BY_LABEL[String(consumer.part).toLowerCase()] ??
-                null,
-              role: "adapter",
-              label: consumer.path,
-              path: consumer.path,
-              description: consumer.preview,
-              summary: consumer.preview,
-              state: "affected",
-              position: { x: 850, y: interfaceY + consumerIndex * 56 },
-              size: { width: 320, height: 54 },
-            });
+          item.consumers.forEach((consumer) => {
+            const consumerNodeId = consumerNodeIdsByPath[consumer.path];
+            if (!consumerNodeId) {
+              return;
+            }
+
             edges.push({
               id: `edge:${interfaceNodeId}:${consumerNodeId}`,
               source: interfaceNodeId,
               target: consumerNodeId,
               type: "impact",
-              label: "consumed by",
+              label: "used by",
             });
-            findingsByNodeId[consumerNodeId] = relatedFindings;
-            filesByNodeId[consumerNodeId] = [];
-            primaryPathByNodeId[consumerNodeId] = consumer.path;
-            summaryByNodeId[consumerNodeId] = consumer.preview;
           });
         });
 
@@ -574,6 +715,40 @@ function OverviewGraphPage({
       }, {}),
     [changedInterfaces],
   );
+  const changedInterfacesByProviderPath = useMemo(
+    () =>
+      changedInterfaces.reduce((acc, item) => {
+        if (!acc[item.path]) {
+          acc[item.path] = [];
+        }
+        acc[item.path].push(item);
+        return acc;
+      }, {}),
+    [changedInterfaces],
+  );
+  const changedInterfacesByConsumerPath = useMemo(
+    () =>
+      changedInterfaces.reduce((acc, item) => {
+        for (const consumer of item.consumers ?? []) {
+          if (!consumer?.path) {
+            continue;
+          }
+          if (!acc[consumer.path]) {
+            acc[consumer.path] = [];
+          }
+          if (
+            !acc[consumer.path].some(
+              (candidate) =>
+                candidate.path === item.path && candidate.name === item.name,
+            )
+          ) {
+            acc[consumer.path].push(item);
+          }
+        }
+        return acc;
+      }, {}),
+    [changedInterfaces],
+  );
   const issuesByNodeId = useMemo(() => {
     const grouped = {};
     for (const [nodeId, findings] of Object.entries(
@@ -592,14 +767,15 @@ function OverviewGraphPage({
         .flat()
         .find((issue) => issue.id === activeIssueId) ?? null
     );
-  }, [activeIssueId, interfaceGraph.findingsByNodeId, reviewIssues]);
+  }, [activeIssueId, interfaceGraph.findingsByNodeId]);
   useEffect(() => {
     if (!activeIssue) {
+      setFixPrompt("");
       return;
     }
 
     setFixPrompt(activeIssue.fixPrompt ?? "");
-  }, [activeIssue?.id]);
+  }, [activeIssue]);
   const resolveIssueNodeId = (issue) => {
     if (!issue) {
       return null;
@@ -610,7 +786,7 @@ function OverviewGraphPage({
       if (interfaceGraph.nodes.some((node) => node.id === interfaceNodeId)) {
         return interfaceNodeId;
       }
-      const providerNodeId = `provider:${issue.contract.path}:${issue.contract.name}`;
+      const providerNodeId = `provider:${issue.contract.path}`;
       if (interfaceGraph.nodes.some((node) => node.id === providerNodeId)) {
         return providerNodeId;
       }
@@ -712,15 +888,6 @@ function OverviewGraphPage({
   }, [interfaceGraph.summaryByNodeId]);
 
   useEffect(() => {
-    if (!activeIssue) {
-      setFixPrompt("");
-      return;
-    }
-
-    setFixPrompt(activeIssue.fixPrompt ?? "");
-  }, [activeIssue]);
-
-  useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Escape") {
         setSelectedPath(null);
@@ -807,23 +974,21 @@ function OverviewGraphPage({
       return;
     }
 
-    const selectedBaseBranch = compareBranch || null;
-    const selectedHeadBranch = currentBranchName || null;
+    const selectedCompare = {
+      baseBranch: compareBranch || null,
+      headBranch: null,
+    };
 
     onQueueReexamine({
-      baseBranch: selectedBaseBranch,
-      headBranch: selectedHeadBranch,
+      compare: selectedCompare,
       generatedAt: payload.generatedAt ?? null,
-      message: selectedBaseBranch
-        ? `The OpenCode session is thinking in the background. Using ${selectedBaseBranch} as the compare branch, and this page will refresh when it is ready.`
+      message: selectedCompare.baseBranch
+        ? `The OpenCode session is thinking in the background. Using ${selectedCompare.baseBranch} as the compare branch, and this page will refresh when it is ready.`
         : "The OpenCode session is thinking in the background, and this page will refresh when it is ready.",
     });
 
     try {
-      await viewerControl.actions.reexamine({
-        baseBranch: selectedBaseBranch,
-        headBranch: selectedHeadBranch,
-      });
+      await viewerControl.actions.reexamine(selectedCompare);
     } catch (error) {
       onReexamineError(
         error instanceof Error ? error.message : String(error),
@@ -839,7 +1004,6 @@ function OverviewGraphPage({
 
   const handleSelectIssue = (issue) => {
     setActiveIssueId(issue.id);
-    setFixPrompt("");
     const nodeId = resolveIssueNodeId(issue);
     if (nodeId) {
       setFocusedNodeId(nodeId);
@@ -1050,6 +1214,13 @@ function OverviewGraphPage({
                         "--node-index": index,
                       }}
                       onClick=${() => {
+                        if (
+                          node.nodeKind === "provider" ||
+                          node.nodeKind === "consumer"
+                        ) {
+                          handleSelectNode(node);
+                          return;
+                        }
                         if (primaryIssue) {
                           handleSelectIssue(primaryIssue);
                           return;
@@ -1119,19 +1290,19 @@ function OverviewGraphPage({
         style=${inspector.panelStyle}
       >
         ${activeIssue
-          ? html`<${IssueFixerPanel}
-              issue=${activeIssue}
-              fixPrompt=${fixPrompt}
-              setFixPrompt=${setFixPrompt}
-              compareBranch=${compareBranch}
-              currentBranch=${currentBranchName}
-              activeComparison=${activeComparison}
-              issueDiffFile=${activeIssueDiffFile}
-              relatedFiles=${activeIssueRelatedFiles}
-              viewerControl=${viewerControl}
-              onClose=${() => setActiveIssueId(null)}
-            />`
-          : focusedNode?.nodeKind === "interface"
+            ? html`<${IssueFixerPanel}
+                issue=${activeIssue}
+                fixPrompt=${fixPrompt}
+                setFixPrompt=${setFixPrompt}
+                compareBranch=${compareBranch}
+                currentBranch=${currentBranchName}
+                activeComparison=${activeComparison}
+                issueDiffFile=${activeIssueDiffFile}
+                relatedFiles=${activeIssueRelatedFiles}
+                viewerControl=${viewerControl}
+                onClose=${() => setActiveIssueId(null)}
+              />`
+            : focusedNode?.nodeKind === "interface"
             ? html`<${InterfaceDetailsPanel}
                 node=${focusedNode}
                 interfaceItem=${changedInterfaces.find(
@@ -1140,42 +1311,63 @@ function OverviewGraphPage({
                     item.name === focusedNode.label,
                 ) ?? null}
                 findings=${issuesByNodeId[focusedNode.id] ?? []}
-                worktreePath=${payload.worktreePath}
                 onSelectIssue=${handleSelectIssue}
+                worktreePath=${payload.worktreePath}
               />`
-            : focusedNode
-              ? html`<${RepoPartDetailsPanel}
-                  node=${focusedNode}
-                  findings=${issuesByNodeId[focusedPartId] ??
-                  issuesByNodeId[focusedNode.id] ??
-                  []}
-                  changedFiles=${interfaceGraph.filesByPartId[
-                    focusedPartId
-                  ] ??
-                  interfaceGraph.filesByPartId[focusedNode.id] ??
-                  []}
-                  changedInterfaces=${changedInterfacesByPartId[
-                    focusedPartId
-                  ] ?? []}
-                  selectedIssue=${activeIssue}
-                  viewerControl=${viewerControl}
-                  onSelectIssue=${handleSelectIssue}
-                />`
-              : html`<${OverviewReviewPanel}
-                  changedLayers=${layout.visibleNodes}
-                  graphSummary=${graphSummary}
-                  reviewDiff=${{
-                    ...reviewDiff,
-                    files: activeComparison.files,
-                    baseLabel: compareBranch,
-                  }}
-                  findings=${Object.values(issuesByNodeId).flat()}
-                  changedPaths=${(activeComparison.files ?? []).map(
-                    (file) => file.path,
-                  )}
-                  onSelectNode=${handleSelectNode}
-                  onSelectIssue=${handleSelectIssue}
-                />`}
+            : focusedNode?.nodeKind === "consumer"
+                ? html`<${ConsumerDetailsPanel}
+                    node=${focusedNode}
+                    interfaceItems=${changedInterfacesByConsumerPath[
+                      focusedNode.path
+                    ] ?? []}
+                    findings=${issuesByNodeId[focusedNode.id] ?? []}
+                    selectedIssue=${activeIssue}
+                    onSelectNode=${handleSelectNode}
+                    onSelectIssue=${handleSelectIssue}
+                    worktreePath=${payload.worktreePath}
+                  />`
+                : focusedNode
+                  ? html`<${RepoPartDetailsPanel}
+                      node=${focusedNode}
+                      findings=${issuesByNodeId[focusedPartId] ??
+                      issuesByNodeId[focusedNode.id] ??
+                      []}
+                      changedFiles=${interfaceGraph.filesByPartId[
+                        focusedPartId
+                      ] ??
+                      interfaceGraph.filesByPartId[focusedNode.id] ??
+                      []}
+                      changedInterfaces=${changedInterfacesByPartId[
+                        focusedPartId
+                      ] ?? []}
+                      worktreePath=${payload.worktreePath}
+                    />`
+                  : html`<${OverviewReviewPanel}
+                      changedLayers=${layout.visibleNodes}
+                      graphSummary=${graphSummary}
+                      reviewDiff=${{
+                        ...reviewDiff,
+                        files: activeComparison.files,
+                        compare: {
+                          ...reviewDiff.compare,
+                          baseBranch: compareBranch,
+                          headBranch:
+                            currentBranchName || reviewDiff.compare?.headBranch || null,
+                          mergeBase:
+                            activeComparison.mergeBase ??
+                            reviewDiff.compare?.mergeBase ??
+                            null,
+                        },
+                      }}
+                      findings=${Object.values(issuesByNodeId).flat()}
+                      changedInterfaces=${changedInterfaces}
+                      changedPaths=${(activeComparison.files ?? []).map(
+                        (file) => file.path,
+                      )}
+                      onSelectIssue=${handleSelectIssue}
+                      onSelectNode=${handleSelectNode}
+                      worktreePath=${payload.worktreePath}
+                    />`}
       </aside>
     </div>
   `;

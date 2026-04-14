@@ -26,7 +26,7 @@ export function getViewerDebugMetrics(payload) {
   const graphDocument = payload.graphDocument ?? null;
 
   return [
-    { label: "Compare base", value: reviewDiff?.baseLabel ?? "—" },
+    { label: "Compare base", value: reviewDiff?.compare?.baseBranch ?? "—" },
     { label: "Changed files", value: reviewDiff?.files?.length ?? 0 },
     { label: "Issue count", value: reviewIssues.length },
     { label: "Graph nodes", value: graphDocument?.nodes?.length ?? 0 },

@@ -1,6 +1,10 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { SnapshotCollectionError } from "../errors.js"
+import {
+  resolveReviewCompare,
+  type TReviewCompare,
+} from "../schemas/review-range.js"
 
 export type TCollectedFileState = "changed" | "affected" | "unchanged"
 
@@ -13,6 +17,7 @@ export type TCollectedFile = {
   state: TCollectedFileState
   impactSources: string[]
   impactReasons: string[]
+  consumerPaths: string[]
 }
 
 export type TRepoSnapshot = {
@@ -20,9 +25,7 @@ export type TRepoSnapshot = {
   repoName: string
   readme: string | null
   packageJson: string | null
-  branch: string | null
-  compareBaseBranch: string | null
-  compareHeadBranch: string | null
+  compare: TReviewCompare
   gitStatusSummary: string | null
   recentCommits: string[]
   fileTree: string[]
@@ -231,14 +234,31 @@ function extractRelativeImports({
     if (!rawTarget) continue
 
     const candidateBase = path.posix.normalize(path.posix.join(directory, rawTarget))
+    const candidateWithoutExtension = candidateBase.replace(
+      /\.(?:[mc]?js|jsx|ts|tsx)$/u,
+      "",
+    )
     const possibilities = [
       candidateBase,
+      candidateWithoutExtension,
+      `${candidateWithoutExtension}.ts`,
+      `${candidateWithoutExtension}.tsx`,
+      `${candidateWithoutExtension}.js`,
+      `${candidateWithoutExtension}.jsx`,
+      `${candidateWithoutExtension}.mjs`,
+      `${candidateWithoutExtension}.cjs`,
       `${candidateBase}.ts`,
       `${candidateBase}.tsx`,
       `${candidateBase}.js`,
       `${candidateBase}.jsx`,
       `${candidateBase}.mjs`,
       `${candidateBase}.cjs`,
+      `${candidateWithoutExtension}/index.ts`,
+      `${candidateWithoutExtension}/index.tsx`,
+      `${candidateWithoutExtension}/index.js`,
+      `${candidateWithoutExtension}/index.jsx`,
+      `${candidateWithoutExtension}/index.mjs`,
+      `${candidateWithoutExtension}/index.cjs`,
       `${candidateBase}/index.ts`,
       `${candidateBase}/index.tsx`,
       `${candidateBase}/index.js`,
@@ -298,23 +318,21 @@ async function buildImportGraph({
 
 async function collectChangedFiles({
   repoPath,
-  baseBranch,
-  headBranch,
+  compare,
 }: {
   repoPath: string
-  baseBranch?: string | null
-  headBranch?: string | null
+  compare: TReviewCompare
 }): Promise<Map<string, string>> {
   const changedStatuses = new Map<string, string>()
   const statusOutput = await runGit(repoPath, ["status", "--short"])
-  const resolvedBaseBranch = typeof baseBranch === "string" && baseBranch.trim() ? baseBranch.trim() : null
-  const resolvedHeadBranch = typeof headBranch === "string" && headBranch.trim() ? headBranch.trim() : "HEAD"
+  const resolvedBaseBranch = compare.baseBranch
+  const resolvedHeadBranch = compare.headBranch ?? "HEAD"
 
   for (const line of (statusOutput ?? "").split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const status = trimmed.slice(0, 2).trim() || "??"
-    const rawPath = trimmed.slice(3).split(" -> ").at(-1)?.trim()
+    if (!line.trim()) continue
+    const match = line.match(/^(..?)\s+(.*)$/)
+    const status = match?.[1]?.trim() || "??"
+    const rawPath = match?.[2]?.split(" -> ").at(-1)?.trim()
     if (!rawPath) continue
     for (const expandedPath of await expandChangedPath({ repoPath, rawPath })) {
       changedStatuses.set(expandedPath, status)
@@ -326,15 +344,21 @@ async function collectChangedFiles({
     const diffOutput = await runGit(repoPath, ["diff", "--name-status", `${candidate}...${resolvedHeadBranch}`])
     if (diffOutput === null) continue
 
+    let didRecordDiff = false
+
     for (const line of diffOutput.split("\n")) {
       const [rawStatus, ...rawPathParts] = line.trim().split(/\s+/)
       const rawPath = rawPathParts.at(-1)
       if (!rawStatus || !rawPath) continue
+      didRecordDiff = true
       if (!changedStatuses.has(rawPath)) {
         changedStatuses.set(rawPath, rawStatus)
       }
     }
-    break
+
+    if (didRecordDiff || resolvedBaseBranch) {
+      break
+    }
   }
 
   return changedStatuses
@@ -404,13 +428,11 @@ function collectImpactedFiles({
 export async function collectRepoSnapshot({
   repoPath,
   fileLimit = MAX_FILE_TREE_ENTRIES,
-  baseBranch,
-  headBranch,
+  compare,
 }: {
   repoPath: string
   fileLimit?: number
-  baseBranch?: string | null
-  headBranch?: string | null
+  compare?: Partial<TReviewCompare> | null
 }): Promise<TRepoSnapshot> {
   const resolvedRepoPath = path.resolve(repoPath)
   if (!(await safeStat(resolvedRepoPath))) {
@@ -424,17 +446,23 @@ export async function collectRepoSnapshot({
   const packageJsonPath = path.join(resolvedRepoPath, "package.json")
   const fileTree = await listFiles(resolvedRepoPath, fileLimit)
   const gitStatusSummary = await runGit(resolvedRepoPath, ["status", "--short"])
-  const branch = await runGit(resolvedRepoPath, ["branch", "--show-current"])
+  const currentBranch = await runGit(resolvedRepoPath, ["branch", "--show-current"])
   const recentCommitsRaw = await runGit(resolvedRepoPath, ["log", "--format=%h %s", "-5"])
   const recentCommits = recentCommitsRaw ? recentCommitsRaw.split("\n").filter(Boolean) : []
-  const resolvedBaseBranch = typeof baseBranch === "string" && baseBranch.trim() ? baseBranch.trim() : null
-  const resolvedHeadBranch = typeof headBranch === "string" && headBranch.trim()
-    ? headBranch.trim()
-    : branch?.trim() || null
+  const hasWorktreeChanges = Boolean(gitStatusSummary?.trim())
+  const currentBranchName = currentBranch?.trim() || null
+  const normalizedCompare = resolveReviewCompare(compare, {
+    headBranch: hasWorktreeChanges ? "HEAD" : currentBranch?.trim() || null,
+  })
+  const resolvedCompare = hasWorktreeChanges && normalizedCompare.headBranch === currentBranchName
+    ? {
+        ...normalizedCompare,
+        headBranch: "HEAD",
+      }
+    : normalizedCompare
   const changedStatuses = await collectChangedFiles({
     repoPath: resolvedRepoPath,
-    baseBranch: resolvedBaseBranch,
-    headBranch: resolvedHeadBranch,
+    compare: resolvedCompare,
   })
   const graph = await buildImportGraph({ repoPath: resolvedRepoPath, fileTree })
   const impactedFiles = collectImpactedFiles({
@@ -478,6 +506,9 @@ export async function collectRepoSnapshot({
             : "unchanged",
         impactSources: impacted ? [...impacted.impactSources].sort() : [],
         impactReasons: impacted ? [...impacted.impactReasons].sort() : [],
+        consumerPaths: [...(graph.incoming.get(relativePath) ?? [])]
+          .filter(isInterfaceReviewableFile)
+          .sort(),
       } satisfies TCollectedFile
     }),
   )
@@ -487,9 +518,7 @@ export async function collectRepoSnapshot({
     repoName,
     readme: trimText(await safeReadText(readmePath), MAX_README_LENGTH),
     packageJson: trimText(await safeReadText(packageJsonPath), MAX_PACKAGE_JSON_LENGTH),
-    branch: branch || null,
-    compareBaseBranch: resolvedBaseBranch,
-    compareHeadBranch: resolvedHeadBranch,
+    compare: resolvedCompare,
     gitStatusSummary,
     recentCommits,
     fileTree,

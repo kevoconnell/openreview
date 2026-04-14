@@ -20,7 +20,7 @@ export type TReviewDebugArtifact = {
   snapshot: {
     repoPath: string;
     repoName: string;
-    branch: string | null;
+    compare: TRepoSnapshot["compare"];
     gitStatusSummary: string | null;
     recentCommits: string[];
     fileTree: string[];
@@ -109,6 +109,7 @@ function buildMergedFiles({
       state: "affected" as const,
       impactSources: [],
       impactReasons: [],
+      consumerPaths: [],
     };
     const reviewFile = reviewByPath.get(snapshotFile.path);
     return {
@@ -118,6 +119,7 @@ function buildMergedFiles({
       changeType: snapshotFile.changeType,
       impactSources: snapshotFile.impactSources,
       impactReasons: snapshotFile.impactReasons,
+      consumerPaths: snapshotFile.consumerPaths ?? [],
       moduleBoundary:
         reviewFile?.moduleBoundary ??
         (snapshotFile.path.includes("bin/")
@@ -255,7 +257,7 @@ function buildDebugArtifact({
     snapshot: {
       repoPath: snapshot.repoPath,
       repoName: snapshot.repoName,
-      branch: snapshot.branch,
+      compare: snapshot.compare,
       gitStatusSummary: snapshot.gitStatusSummary,
       recentCommits: snapshot.recentCommits,
       fileTree: snapshot.fileTree,

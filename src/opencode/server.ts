@@ -6,12 +6,14 @@ import net from "node:net"
 import path from "node:path"
 
 type TRepoOpenCodeServerState = {
+  serverVersion?: number
   pid: number | null
   baseUrl: string
   repoPath: string
   startedAt: string
 }
 
+const OPENCODE_SERVER_VERSION = 1
 const DEFAULT_OPENCODE_BASE_URL = process.env.OPENCODE_BASE_URL?.trim() || "http://localhost:4096"
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -316,6 +318,7 @@ async function startServerAtBaseUrl({
         repoPath,
         outputDirName,
         state: {
+          serverVersion: OPENCODE_SERVER_VERSION,
           pid: Number.isFinite(serverPid) ? serverPid : null,
           baseUrl,
           repoPath,
@@ -347,8 +350,21 @@ export async function ensureRepoOpenCodeServer({
     repoPath: resolvedRepoPath,
     outputDirName,
   })
+  const hasCompatiblePriorState = !priorState || priorState.serverVersion === OPENCODE_SERVER_VERSION
 
-  if (priorState?.baseUrl && await isHealthy(`${priorState.baseUrl}/global/health`)) {
+  if (priorState && !hasCompatiblePriorState) {
+    killProcess(priorState.pid ?? null)
+    killServerOnPort(parsePort(priorState.baseUrl))
+    if (priorState.baseUrl === baseUrl) {
+      killServerOnPort(defaultPort)
+    }
+  }
+
+  if (
+    hasCompatiblePriorState &&
+    priorState?.baseUrl &&
+    await isHealthy(`${priorState.baseUrl}/global/health`)
+  ) {
     if (await serverMatchesRepo({
       baseUrl: priorState.baseUrl,
       repoPath: resolvedRepoPath,
@@ -357,6 +373,7 @@ export async function ensureRepoOpenCodeServer({
         repoPath: resolvedRepoPath,
         outputDirName,
         state: {
+          serverVersion: OPENCODE_SERVER_VERSION,
           pid: priorState.pid,
           baseUrl: priorState.baseUrl,
           repoPath: resolvedRepoPath,
@@ -367,7 +384,7 @@ export async function ensureRepoOpenCodeServer({
     }
   }
 
-  if (await isHealthy(`${baseUrl}/global/health`)) {
+  if (hasCompatiblePriorState && await isHealthy(`${baseUrl}/global/health`)) {
     if (await serverMatchesRepo({
       baseUrl,
       repoPath: resolvedRepoPath,
@@ -376,6 +393,7 @@ export async function ensureRepoOpenCodeServer({
         repoPath: resolvedRepoPath,
         outputDirName,
         state: {
+          serverVersion: OPENCODE_SERVER_VERSION,
           pid: priorState?.baseUrl === baseUrl ? priorState.pid : null,
           baseUrl,
           repoPath: resolvedRepoPath,

@@ -19,6 +19,7 @@ import {
   writeDebugArtifact,
   type TArtifactPaths,
 } from "../outputs/write-artifacts.js";
+import type { TReviewCompare } from "../schemas/review-range.js";
 import { syncCheckedInViewerAssets } from "../viewer/build/sync-assets.js";
 
 export type TGenerateReviewResult = TArtifactPaths & {
@@ -32,16 +33,14 @@ export async function generateReview({
   repoPath,
   mode = "full",
   config,
-  baseBranch,
-  headBranch,
+  compare,
   promptHint = process.env.OPENREVIEW_PROMPT_HINT ?? "",
   signal,
 }: {
   repoPath: string;
   mode?: TGenerateReviewMode;
   config?: Partial<TReviewConfig>;
-  baseBranch?: string | null;
-  headBranch?: string | null;
+  compare?: Partial<TReviewCompare> | null;
   promptHint?: string;
   signal?: AbortSignal;
 }): Promise<TGenerateReviewResult> {
@@ -58,8 +57,7 @@ export async function generateReview({
   });
   const snapshot = await collectRepoSnapshot({
     repoPath: resolvedRepoPath,
-    ...(baseBranch !== undefined ? { baseBranch } : {}),
-    ...(headBranch !== undefined ? { headBranch } : {}),
+    ...(compare !== undefined ? { compare } : {}),
   });
   const prompt = buildReviewPrompt({ snapshot });
   const promptText = [

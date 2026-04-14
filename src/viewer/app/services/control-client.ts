@@ -12,6 +12,39 @@ function normalizeControlToken(controlToken) {
   return typeof controlToken === "string" && controlToken ? controlToken : null;
 }
 
+function normalizeReviewBranchName(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeReviewCompare(compare) {
+  if (compare == null) {
+    return null;
+  }
+
+  if (!compare || typeof compare !== "object" || Array.isArray(compare)) {
+    throw new Error(
+      "Reexamine compare must be an object with baseBranch and headBranch.",
+    );
+  }
+
+  if (Object.hasOwn(compare, "compareBranch")) {
+    throw new Error(
+      "Reexamine compare must use baseBranch instead of compareBranch.",
+    );
+  }
+
+  const normalizedCompare = {
+    baseBranch: normalizeReviewBranchName(compare.baseBranch),
+    headBranch: normalizeReviewBranchName(compare.headBranch),
+  };
+
+  if (!normalizedCompare.baseBranch && !normalizedCompare.headBranch) {
+    return null;
+  }
+
+  return normalizedCompare;
+}
+
 function normalizeControlBinding({ controlPort, controlToken } = {}) {
   return {
     controlPort: hasControlPort(controlPort) ? controlPort : null,
@@ -44,6 +77,29 @@ async function readControlError(response, fallbackMessage) {
   return fallbackMessage;
 }
 
+async function requestWithTimeout(request, pathname, options = {}) {
+  const { timeoutMs, signal, ...requestOptions } = options;
+  if (!(typeof timeoutMs === "number" && timeoutMs > 0)) {
+    return request(pathname, { ...requestOptions, signal });
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  const abortFromCaller = () => controller.abort();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    return await request(pathname, {
+      ...requestOptions,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
 export function createViewerControlClient(binding = {}) {
   const resolvedBinding = normalizeControlBinding(binding);
   const isAvailable = () => hasControlPort(resolvedBinding.controlPort);
@@ -61,7 +117,10 @@ export function createViewerControlClient(binding = {}) {
       return null;
     }
 
-    const response = await request("/control/status");
+    const response = await requestWithTimeout(request, "/control/status", {
+      method: "GET",
+      timeoutMs: 5000,
+    });
     if (!response.ok) {
       return null;
     }
@@ -130,15 +189,30 @@ export function createViewerControlClient(binding = {}) {
 
   const actions = {
     async hardReset() {
-      await runAction("/control/hard-reset", {
+      await runAction("/control/refresh", {
         requireAuth: true,
+        includeJson: true,
+        body: JSON.stringify({ mode: "full" }),
         unavailableMessage:
           "Hard reset is unavailable until the viewer control server is running.",
-        failureMessage: (status) => `Hard reset failed with status ${status}.`,
+        failureMessage: (status) =>
+          `Hard reset failed with status ${status}.`,
       });
     },
-    async retry() {
-      await actions.hardReset();
+    async reexamine(compare) {
+      const normalizedCompare = normalizeReviewCompare(compare);
+      await runAction("/control/refresh", {
+        requireAuth: true,
+        includeJson: true,
+        body: JSON.stringify({
+          mode: "incremental",
+          ...(normalizedCompare ? { compare: normalizedCompare } : {}),
+        }),
+        unavailableMessage:
+          "Reexamine needs the viewer service. Start or refresh OpenReview, then try again.",
+        failureMessage: (status) =>
+          `Reexamine request failed with status ${status}.`,
+      });
     },
     async sendFixPrompt({ prompt, files }) {
       const body = Array.isArray(files) ? { prompt, files } : { prompt };
@@ -178,20 +252,6 @@ export function createViewerControlClient(binding = {}) {
             ? payload.currentBranch.trim()
             : null,
       };
-    },
-    async reexamine({ baseBranch, headBranch, compareBranch }) {
-      await runAction("/control/reexamine", {
-        requireAuth: true,
-        includeJson: true,
-        body: JSON.stringify({
-          baseBranch: baseBranch || null,
-          headBranch: headBranch || compareBranch || null,
-        }),
-        unavailableMessage:
-          "Reexamine needs the viewer service. Start or refresh OpenReview, then try again.",
-        failureMessage: (status) =>
-          `Reexamine request failed with status ${status}.`,
-      });
     },
   };
 

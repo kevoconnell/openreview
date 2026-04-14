@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { createElement, useMemo, useState } from "react";
+import { createElement, useId, useMemo, useState } from "react";
 import htm from "htm";
 import {
   isCombineOpportunity,
@@ -13,6 +13,51 @@ import {
 } from "./findings";
 
 const html = htm.bind(createElement);
+
+async function copyPromptToClipboard(prompt, setCopied) {
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    }
+  } catch {
+    setCopied(false);
+  }
+}
+
+function PromptEditorControls({
+  prompt,
+  setPrompt,
+  copied,
+  onCopy,
+  primaryAction = null,
+  note = "",
+}) {
+  const editorId = useId();
+
+  return html`
+    <label className="issue-fixer-label" htmlFor=${editorId}
+      >Edit improvement prompt</label
+    >
+    <textarea
+      id=${editorId}
+      className="issue-fixer-textarea"
+      value=${prompt}
+      onInput=${(event) => setPrompt(event.currentTarget.value)}
+      rows=${3}
+    ></textarea>
+    <div className="inspector-action-row">
+      ${primaryAction}
+      <button className="inspector-inline-action" onClick=${onCopy}>
+        ${copied ? "Copied" : "Copy prompt"}
+      </button>
+    </div>
+    ${note
+      ? html`<p className="issue-fixer-note">${note}</p>`
+      : null}
+  `;
+}
 
 function GitReviewBranchDropdown({
   compareBranch,
@@ -57,8 +102,6 @@ function GitReviewTopbar({
   compareOptions,
   setCompareBranch,
   compareOptionsLoading,
-  graphSummary,
-  worktreePath,
   onReexamine,
   reexamineState,
   reexamineMessage,
@@ -153,15 +196,7 @@ function IssueFixerPanel({
   }, [issueDiffFile, relatedFiles]);
 
   const handleCopy = async () => {
-    try {
-      if (navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(fixPrompt);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1600);
-      }
-    } catch {
-      setCopied(false);
-    }
+    await copyPromptToClipboard(fixPrompt, setCopied);
   };
 
   const handleFix = async () => {
@@ -234,11 +269,6 @@ function IssueFixerPanel({
                     >`,
                 )}
               </div>
-              <p className="inspector-copy inspector-copy-secondary">
-                This looks like one consumer job spread across multiple methods.
-                Prefer one clear function instead of making callers choose
-                between near-duplicates.
-              </p>
             </div>`
           : null}
         ${renderInterfaceChangePreview(issue, {
@@ -249,43 +279,6 @@ function IssueFixerPanel({
               <strong>Why this is better:</strong> ${issue.whyBetter}
             </p>`
           : null}
-        ${issue.suggestions?.length
-          ? html`<div className="inspector-section">
-              <p className="inspector-kicker">Options</p>
-              <div className="review-findings-groups">
-                ${issue.suggestions.map(
-                  (suggestion, index) =>
-                    html`<div
-                      key=${`${suggestion.label}:${index}`}
-                      className="inspector-list-item static interface-improvement-card"
-                    >
-                      <div>
-                        <strong
-                          >${suggestion.label || `Option ${index + 1}`}</strong
-                        >
-                        <div className="finding-code-preview">
-                          <pre><code>${suggestion.better}</code></pre>
-                        </div>
-                        ${suggestion.whyBetter
-                          ? html`<p
-                              className="inspector-copy inspector-copy-secondary"
-                            >
-                              ${suggestion.whyBetter}
-                            </p>`
-                          : null}
-                        ${suggestion.tradeoff
-                          ? html`<p
-                              className="inspector-copy inspector-copy-secondary"
-                            >
-                              <strong>Tradeoff:</strong> ${suggestion.tradeoff}
-                            </p>`
-                          : null}
-                      </div>
-                    </div>`,
-                )}
-              </div>
-            </div>`
-          : null}
         ${issue.contract
           ? html`<div className="inspector-section">
               <p className="inspector-kicker">Why this function matters</p>
@@ -293,30 +286,6 @@ function IssueFixerPanel({
                 <strong>${issue.contract.name}</strong> in
                 <code>${issue.contract.path}</code>
               </p>
-              <div className="file-stat-grid">
-                <div className="file-stat">
-                  <span className="file-stat-label">Consumer fanout</span>
-                  <span className="file-stat-value"
-                    >${issue.contract.consumerParts?.length || 0}</span
-                  >
-                </div>
-                <div className="file-stat">
-                  <span className="file-stat-label">Target</span>
-                  <span className="file-stat-value">Better after</span>
-                </div>
-              </div>
-              ${issue.contract.consumerParts?.length
-                ? html`<div className="inspector-pill-grid">
-                    ${issue.contract.consumerParts.map(
-                      (part) =>
-                        html`<span key=${part} className="inspector-pill"
-                          >${part}</span
-                        >`,
-                    )}
-                  </div>`
-                : html`<p className="inspector-copy inspector-copy-secondary">
-                    No external consumers were detected for this contract yet.
-                  </p>`}
               <${InterfaceSuggestionCard}
                 title=${issue.contract.name}
                 path=${codeLocation?.label ?? issue.contract.path}
@@ -331,38 +300,27 @@ function IssueFixerPanel({
               />
             </div>`
           : null}
-        <label className="issue-fixer-label" for="issue-fix-prompt"
-          >Edit improvement prompt</label
-        >
-        <textarea
-          id="issue-fix-prompt"
-          className="issue-fixer-textarea"
-          value=${fixPrompt}
-          onInput=${(event) => setFixPrompt(event.currentTarget.value)}
-          rows=${3}
-        ></textarea>
         ${includedFiles.length
           ? html`<p className="issue-fixer-note">
               OpenCode will include:
               <strong>${includedFiles.join(", ")}</strong>
             </p>`
           : null}
-        <div className="inspector-action-row">
-          <button
+        <${PromptEditorControls}
+          prompt=${fixPrompt}
+          setPrompt=${setFixPrompt}
+          copied=${copied}
+          onCopy=${handleCopy}
+          primaryAction=${html`<button
             className="btn-fix-primary"
             onClick=${handleFix}
             disabled=${sendState === "sending"}
           >
             ${sendState === "sending" ? "Sending…" : "Fix in OpenCode"}
-          </button>
-          <button className="inspector-inline-action" onClick=${handleCopy}>
-            ${copied ? "Copied" : "Copy prompt"}
-          </button>
-        </div>
-        <p className="issue-fixer-note">
-          ${sendMessage ||
+          </button>`}
+          note=${sendMessage ||
           "Use this prompt to implement the suggested interface directly in OpenCode, or copy and refine it manually."}
-        </p>
+        />
       </div>
     </div>
   `;
@@ -370,46 +328,14 @@ function IssueFixerPanel({
 
 function PromptSuggestionCard({
   issue,
-  viewerControl,
+  includedFiles,
   initiallyExpanded = false,
 }) {
   const [prompt, setPrompt] = useState(issue.fixPrompt ?? "");
   const [copied, setCopied] = useState(false);
-  const [sendState, setSendState] = useState("idle");
-  const [sendMessage, setSendMessage] = useState("");
 
   const handleCopy = async () => {
-    try {
-      if (navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(prompt);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1600);
-      }
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  const handleFix = async () => {
-    if (!viewerControl?.isAvailable?.()) {
-      setSendState("error");
-      setSendMessage(
-        "OpenCode handoff is unavailable while the viewer service is offline.",
-      );
-      return;
-    }
-
-    setSendState("sending");
-    setSendMessage("");
-
-    try {
-      await viewerControl.actions.sendFixPrompt({ prompt });
-      setSendState("sent");
-      setSendMessage("OpenCode opened on the far right with this prompt.");
-    } catch (error) {
-      setSendState("error");
-      setSendMessage(error instanceof Error ? error.message : String(error));
-    }
+    await copyPromptToClipboard(prompt, setCopied);
   };
 
   return html`
@@ -448,29 +374,15 @@ function PromptSuggestionCard({
             <strong>Why this is better:</strong> ${issue.whyBetter}
           </p>`
         : null}
-      <label className="issue-fixer-label">Edit improvement prompt</label>
-      <textarea
-        className="issue-fixer-textarea"
-        value=${prompt}
-        onInput=${(event) => setPrompt(event.currentTarget.value)}
-        rows=${3}
-      ></textarea>
-      <div className="inspector-action-row">
-        <button
-          className="btn-fix-primary"
-          onClick=${handleFix}
-          disabled=${sendState === "sending"}
-        >
-          ${sendState === "sending" ? "Sending…" : "Fix in OpenCode"}
-        </button>
-        <button className="inspector-inline-action" onClick=${handleCopy}>
-          ${copied ? "Copied" : "Copy prompt"}
-        </button>
-      </div>
-      <p className="issue-fixer-note">
-        ${sendMessage ||
-        "Fix in OpenCode opens a dedicated pane with the suggested interface change."}
-      </p>
+      <${PromptEditorControls}
+        prompt=${prompt}
+        setPrompt=${setPrompt}
+        copied=${copied}
+        onCopy=${handleCopy}
+        note=${includedFiles?.length
+          ? `Suggested files to inspect manually: ${includedFiles.join(", ")}`
+          : "Copy and refine this prompt manually."}
+      />
     </div>
   `;
 }

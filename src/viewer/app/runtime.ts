@@ -726,7 +726,7 @@ function StatusPage({
     setRetryMessage("");
 
     try {
-      await retryControl.actions.retry();
+      await retryControl.actions.hardReset();
       setRetryMessage(
         "Waiting for the OpenReview service to restart the review.",
       );
@@ -792,6 +792,7 @@ function ViewerApp({ payload }) {
     ],
   );
   const hasRedirectedRef = useRef(false);
+  const hasReloadedAfterControlLossRef = useRef(false);
   const statusRefreshDelayMs =
     livePayload?.pageType === "status"
       ? typeof livePayload?.autoRefreshMs === "number" &&
@@ -801,22 +802,27 @@ function ViewerApp({ payload }) {
       : null;
 
   const reloadStatusPage = () => {
-    window.location.replace(window.location.pathname);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("v", `${Date.now()}`);
+    window.location.replace(nextUrl.toString());
   };
 
-  const reloadCurrentPage = () => {
-    window.location.reload();
+  const reloadCurrentPage = (version) => {
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("v", String(version ?? Date.now()));
+    window.location.replace(nextUrl.toString());
   };
 
   const handleQueueReexamine = ({
-    baseBranch,
-    headBranch,
+    compare,
     generatedAt,
     message,
   }) => {
     setPendingReexamine({
-      baseBranch: baseBranch ?? null,
-      headBranch: headBranch ?? null,
+      compare: {
+        baseBranch: compare?.baseBranch ?? null,
+        headBranch: compare?.headBranch ?? null,
+      },
       generatedAt: generatedAt ?? null,
       sawBackgroundRun: false,
     });
@@ -883,6 +889,8 @@ function ViewerApp({ payload }) {
           return;
         }
 
+        hasReloadedAfterControlLossRef.current = false;
+
         const nextViewerStatus = next.viewer?.status ?? null;
         const nextViewerError =
           typeof next.viewer?.lastError === "string" &&
@@ -929,8 +937,8 @@ function ViewerApp({ payload }) {
 
         if (pendingReexamine && nextViewerStatus === "starting") {
           setReexamineMessage(
-            pendingReexamine.baseBranch
-              ? `The OpenCode session is thinking in the background. Using ${pendingReexamine.baseBranch} as the compare branch…`
+            pendingReexamine.compare?.baseBranch
+              ? `The OpenCode session is thinking in the background. Using ${pendingReexamine.compare.baseBranch} as the compare branch…`
               : "The OpenCode session is thinking in the background…",
           );
           setPendingReexamine((currentValue) =>
@@ -948,7 +956,7 @@ function ViewerApp({ payload }) {
         ) {
           setPendingReexamine(null);
           disposed = true;
-          reloadCurrentPage();
+          reloadCurrentPage(nextGeneratedAt);
           return;
         }
 
@@ -969,6 +977,20 @@ function ViewerApp({ payload }) {
           }
         }
       } catch {
+        if (
+          !hasRedirectedRef.current &&
+          !hasReloadedAfterControlLossRef.current
+        ) {
+          hasReloadedAfterControlLossRef.current = true;
+          disposed = true;
+          if (livePayload?.pageType === "status") {
+            reloadStatusPage();
+          } else {
+            reloadCurrentPage(Date.now());
+          }
+          return;
+        }
+
         setLivePayload((currentValue) => ({
           ...currentValue,
           tone: "error",

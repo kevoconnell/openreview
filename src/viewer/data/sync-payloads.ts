@@ -1,6 +1,15 @@
 import fs from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import {
+  normalizeReviewCompare,
+  resolveReviewCompare,
+  type TReviewCompare,
+} from "../../schemas/review-range.js";
+import {
+  getPrimaryRepoPartIdForPath,
+  REPO_PARTS_BY_ID,
+} from "../app/services/architecture.js";
 
 type TViewerPayload = Record<string, unknown>;
 
@@ -62,22 +71,32 @@ function upsertReviewDiffFile(
 function buildViewerReviewDiff({
   repoPath,
   existingReviewDiff,
-  baseBranch,
-  headBranch,
+  compare,
 }: {
   repoPath: string;
   existingReviewDiff: unknown;
-  baseBranch?: string | null;
-  headBranch?: string | null;
+  compare?: Partial<TReviewCompare> | null;
 }): Record<string, unknown> | null {
   const currentReviewDiff = isRecord(existingReviewDiff) ? existingReviewDiff : {};
-  const resolvedBaseBranch =
-    normalizeOptionalText(baseBranch) ??
-    normalizeOptionalText(currentReviewDiff.baseLabel);
-  const resolvedHeadBranch =
-    normalizeOptionalText(headBranch) ??
-    normalizeOptionalText(readGit(repoPath, ["branch", "--show-current"])) ??
-    normalizeOptionalText(currentReviewDiff.currentBranch);
+  const currentCompare = normalizeReviewCompare(
+    isRecord(currentReviewDiff.compare)
+      ? currentReviewDiff.compare
+      : {
+          baseBranch: currentReviewDiff.baseLabel,
+          headBranch: currentReviewDiff.currentBranch,
+        },
+  );
+  const resolvedCompare = resolveReviewCompare(compare ?? currentCompare, {
+    headBranch:
+      normalizeOptionalText(readGit(repoPath, ["branch", "--show-current"])) ??
+      currentCompare.headBranch,
+  });
+  const resolvedBaseBranch = resolvedCompare.baseBranch;
+  const resolvedHeadBranch = resolvedCompare.headBranch;
+  const currentMergeBase =
+    isRecord(currentReviewDiff.compare) && "mergeBase" in currentReviewDiff.compare
+      ? normalizeOptionalText(currentReviewDiff.compare.mergeBase)
+      : normalizeOptionalText(currentReviewDiff.mergeBase);
 
   if (!resolvedBaseBranch && !Object.keys(currentReviewDiff).length) {
     return null;
@@ -99,7 +118,7 @@ function buildViewerReviewDiff({
       ? normalizeOptionalText(
           readGit(repoPath, ["merge-base", resolvedBaseBranch, resolvedHeadBranch]),
         )
-      : normalizeOptionalText(currentReviewDiff.mergeBase);
+      : currentMergeBase;
 
   for (const line of (diffNameStatus ?? "").split("\n")) {
     const [rawStatus, ...rawPathParts] = line.trim().split(/\s+/u);
@@ -175,11 +194,19 @@ function buildViewerReviewDiff({
     ),
   );
 
+  const {
+    baseLabel: _baseLabel,
+    currentBranch: _currentBranch,
+    mergeBase: _mergeBase,
+    ...remainingReviewDiff
+  } = currentReviewDiff;
+
   return {
-    ...currentReviewDiff,
-    ...(resolvedBaseBranch ? { baseLabel: resolvedBaseBranch } : {}),
-    ...(resolvedHeadBranch ? { currentBranch: resolvedHeadBranch } : {}),
-    ...(mergeBase ? { mergeBase } : {}),
+    ...remainingReviewDiff,
+    compare: {
+      ...resolvedCompare,
+      mergeBase,
+    },
     files: Array.from(filesByPath.values()),
     compareOptions: nextCompareOptions,
     comparisons: nextComparisons,
@@ -342,8 +369,124 @@ function toFileInsightsIndex(files: Array<Record<string, unknown>>) {
   };
 }
 
+function getConsumerPartLabel(filePath: string): string | null {
+  const partId = getPrimaryRepoPartIdForPath(filePath);
+  return partId ? (REPO_PARTS_BY_ID[partId]?.label ?? null) : null;
+}
+
+function buildConsumerPreview(file: Record<string, unknown>): string {
+  const impactReasons = Array.isArray(file.impactReasons)
+    ? file.impactReasons
+        .map((reason) => normalizeOptionalText(reason))
+        .filter(Boolean)
+    : [];
+  const callerImpact = normalizeOptionalText(file.callerImpact);
+  const reasonText = impactReasons.length
+    ? impactReasons.slice(0, 2).join(", ")
+    : callerImpact;
+  const consumerState = String(file.state ?? "affected") === "changed"
+    ? "Changed consumer"
+    : "Affected consumer";
+
+  return reasonText ? `${consumerState} · ${reasonText}` : consumerState;
+}
+
+function mergeConsumers(consumers: Array<Record<string, unknown>>) {
+  const next = new Map<string, Record<string, unknown>>();
+
+  for (const consumer of consumers) {
+    const consumerPath = normalizeOptionalText(consumer.path);
+    if (!consumerPath) {
+      continue;
+    }
+
+    const existing = next.get(consumerPath);
+    const reasons = [
+      ...(Array.isArray(existing?.reasons) ? existing.reasons : []),
+      ...(Array.isArray(consumer.reasons) ? consumer.reasons : []),
+    ]
+      .map((reason) => normalizeOptionalText(reason))
+      .filter((value, index, all) => Boolean(value) && all.indexOf(value) === index);
+    const state =
+      existing?.state === "changed" || consumer.state === "changed"
+        ? "changed"
+        : "affected";
+
+    next.set(consumerPath, {
+      ...(existing ?? {}),
+      ...consumer,
+      path: consumerPath,
+      state,
+      reasons,
+      preview:
+        String(consumer.preview ?? "").length >=
+        String(existing?.preview ?? "").length
+          ? consumer.preview
+          : existing?.preview,
+    });
+  }
+
+  return Array.from(next.values()).sort((left, right) => {
+    const leftRank = left.state === "changed" ? 0 : 1;
+    const rightRank = right.state === "changed" ? 0 : 1;
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+
+    return String(left.path ?? "").localeCompare(String(right.path ?? ""));
+  });
+}
+
 function deriveChangedInterfaces(files: Array<Record<string, unknown>>) {
   const entries = new Map<string, Record<string, unknown>>();
+  const consumersBySourcePath = new Map<string, Array<Record<string, unknown>>>();
+  const filesByPath = new Map(
+    files.map((file) => [String(file.path ?? ""), file]),
+  );
+
+  const upsertConsumer = (
+    sourcePath: string,
+    consumerPath: string,
+    fallbackFile: Record<string, unknown> | null = null,
+  ) => {
+    const consumerFile = filesByPath.get(consumerPath) ?? fallbackFile ?? { path: consumerPath };
+    const existing = consumersBySourcePath.get(sourcePath) ?? [];
+    existing.push({
+      path: consumerPath,
+      part: getConsumerPartLabel(consumerPath),
+      preview: buildConsumerPreview(consumerFile),
+      state: String(consumerFile.state ?? "affected"),
+      reasons: Array.isArray(consumerFile.impactReasons)
+        ? consumerFile.impactReasons
+        : [],
+    });
+    consumersBySourcePath.set(sourcePath, existing);
+  };
+
+  for (const file of files) {
+    const consumerPath = normalizeOptionalText(file.path);
+    const consumerPaths = Array.isArray(file.consumerPaths)
+      ? file.consumerPaths
+          .map((value) => normalizeOptionalText(value))
+          .filter((value): value is string => Boolean(value))
+      : [];
+    const impactSources = Array.isArray(file.impactSources)
+      ? file.impactSources
+          .map((impactSource) => normalizeOptionalText(impactSource))
+          .filter((impactSource): impactSource is string => Boolean(impactSource))
+      : [];
+
+    if (!consumerPath) {
+      continue;
+    }
+
+    for (const targetConsumerPath of consumerPaths) {
+      upsertConsumer(consumerPath, targetConsumerPath, filesByPath.get(targetConsumerPath) ?? null);
+    }
+    for (const impactSource of impactSources) {
+      upsertConsumer(impactSource, consumerPath, file);
+    }
+  }
 
   for (const file of files) {
     const filePath = String(file.path ?? "");
@@ -361,6 +504,7 @@ function deriveChangedInterfaces(files: Array<Record<string, unknown>>) {
         continue;
       }
       const key = `${filePath}:${functionName}`;
+      const consumers = mergeConsumers(consumersBySourcePath.get(filePath) ?? []);
       entries.set(key, {
         path: filePath,
         sourceOfTruthPath: filePath,
@@ -371,8 +515,14 @@ function deriveChangedInterfaces(files: Array<Record<string, unknown>>) {
           (finding as Record<string, unknown>).current ?? "",
         ),
         snippet: String((finding as Record<string, unknown>).current ?? ""),
-        consumers: [],
-        consumerParts: [],
+        consumers,
+        consumerParts: [
+          ...new Set(
+            consumers
+              .map((consumer) => normalizeOptionalText(consumer.part))
+              .filter(Boolean),
+          ),
+        ],
       });
     }
   }
@@ -392,15 +542,13 @@ export async function syncViewerPayloads({
   repoPath,
   controlPort,
   controlToken,
-  baseBranch,
-  headBranch,
+  compare,
   outputDirName = ".openreview",
 }: {
   repoPath: string;
   controlPort: number;
   controlToken?: string | null;
-  baseBranch?: string | null;
-  headBranch?: string | null;
+  compare?: Partial<TReviewCompare> | null;
   outputDirName?: string;
 }): Promise<number> {
   const htmlPaths = await listViewerHtmlPaths({ repoPath, outputDirName });
@@ -440,8 +588,7 @@ export async function syncViewerPayloads({
       const reviewDiff = buildViewerReviewDiff({
         repoPath,
         existingReviewDiff: existingPayload.reviewDiff,
-        ...(baseBranch !== undefined ? { baseBranch } : {}),
-        ...(headBranch !== undefined ? { headBranch } : {}),
+        ...(compare !== undefined ? { compare } : {}),
       });
 
       const nextPayload: TViewerPayload = {

@@ -19,7 +19,41 @@ import { PromptSuggestionCard } from "./review-controls";
 
 const html = htm.bind(createElement);
 
-function renderSourceOfTruthMeta(entity) {
+function CursorLogo() {
+  return html`<svg
+    viewBox="0 0 32 32"
+    width="16"
+    height="16"
+    aria-hidden="true"
+    focusable="false"
+    className="inspector-cursor-link-logo"
+  >
+    <path
+      fill="currentColor"
+      fillRule="evenodd"
+      d="m16 30l12-20v14zM4 10l12-8l12 8zm0 0l12 6v14L4 24z"
+    />
+  </svg>`;
+}
+
+function renderOpenInCursorLink(value, worktreePath) {
+  const codeLocation = parseCodeLocation(value ?? "", worktreePath);
+  if (!codeLocation) {
+    return null;
+  }
+
+  return html`<a
+    className="inspector-cursor-link"
+    href=${codeLocation.cursorUrl}
+    aria-label=${`Open ${codeLocation.label} in Cursor`}
+    title=${`Open ${codeLocation.label} in Cursor`}
+  >
+    <${CursorLogo} />
+    <span>Open in Cursor</span>
+  </a>`;
+}
+
+function renderSourceOfTruthMeta(entity, worktreePath) {
   const sourceOfTruthPath = entity?.sourceOfTruthPath ?? entity?.path;
   const aliasPaths = getCollapsedAliasPaths(entity);
 
@@ -31,7 +65,7 @@ function renderSourceOfTruthMeta(entity) {
     <div className="inspector-section">
       <p className="inspector-kicker">Source of truth</p>
       <div className="inspector-pill-grid">
-        <span className="inspector-pill">${sourceOfTruthPath}</span>
+        ${renderOpenInCursorLink(sourceOfTruthPath, worktreePath)}
       </div>
       <p className="inspector-copy inspector-copy-secondary">
         This viewer collapses duplicate generated/runtime surfaces into one
@@ -40,9 +74,10 @@ function renderSourceOfTruthMeta(entity) {
       <div className="inspector-pill-grid">
         ${aliasPaths.map(
           (aliasPath) =>
-            html`<span key=${aliasPath} className="inspector-pill"
-              >Collapsed: ${aliasPath}</span
-            >`,
+            html`<span key=${aliasPath}>${renderOpenInCursorLink(
+              aliasPath,
+              worktreePath,
+            )}</span>`,
         )}
       </div>
     </div>
@@ -133,14 +168,219 @@ function DiffFileList({
   </div>`;
 }
 
+function getInterfaceNodeId(item) {
+  return `interface:${item.path}:${item.name}`;
+}
+
+function buildPromptIncludedFiles(item, finding = null) {
+  const next = [];
+  const seen = new Set();
+
+  const pushFile = (value) => {
+    const filePath = normalizeFileReference(value);
+    if (!filePath || seen.has(filePath)) {
+      return;
+    }
+    seen.add(filePath);
+    next.push(filePath);
+  };
+
+  pushFile(finding?.contract?.path ?? finding?.path ?? item?.path);
+  for (const consumer of item?.consumers?.slice?.(0, 3) ?? []) {
+    pushFile(consumer?.path);
+  }
+
+  return next;
+}
+
+function buildSharedConsumerList(interfaceItems = []) {
+  const next = new Map();
+
+  for (const item of interfaceItems) {
+    for (const consumer of item.consumers ?? []) {
+      if (!consumer?.path) {
+        continue;
+      }
+
+      const existing = next.get(consumer.path) ?? {
+        path: consumer.path,
+        preview: consumer.preview,
+        interfaces: [],
+      };
+
+      existing.interfaces = [
+        ...new Set([...(existing.interfaces ?? []), item.name]),
+      ];
+      if (
+        String(consumer.preview ?? "").length >
+        String(existing.preview ?? "").length
+      ) {
+        existing.preview = consumer.preview;
+      }
+
+      next.set(consumer.path, existing);
+    }
+  }
+
+  return Array.from(next.values()).sort((left, right) => {
+    const overlapDelta = right.interfaces.length - left.interfaces.length;
+    if (overlapDelta !== 0) {
+      return overlapDelta;
+    }
+
+    return String(left.path ?? "").localeCompare(String(right.path ?? ""));
+  });
+}
+
+function buildInterfaceDetailsModel(interfaceItem, primaryFinding) {
+  return {
+    name:
+      interfaceItem?.name ||
+      primaryFinding?.contract?.name ||
+      primaryFinding?.functionName ||
+      primaryFinding?.title ||
+      "Interface",
+    declaration:
+      interfaceItem?.declaration ||
+      interfaceItem?.currentDeclaration ||
+      primaryFinding?.current ||
+      primaryFinding?.before ||
+      "No current interface preview available.",
+    path:
+      interfaceItem?.path ||
+      primaryFinding?.contract?.path ||
+      primaryFinding?.path ||
+      "",
+    current:
+      primaryFinding?.current ||
+      interfaceItem?.currentDeclaration ||
+      interfaceItem?.previewSnippet ||
+      interfaceItem?.snippet ||
+      interfaceItem?.declaration ||
+      "",
+    suggestions: primaryFinding?.suggestions ?? [],
+    consumers: interfaceItem?.consumers ?? [],
+    consumerParts:
+      interfaceItem?.consumerParts ?? primaryFinding?.contract?.consumerParts ?? [],
+  };
+}
+
+function findInterfaceItemForFinding(finding, changedInterfaces = []) {
+  const targetPath = normalizeFileReference(
+    finding?.contract?.path ?? finding?.path ?? "",
+  );
+  const targetName = String(
+    finding?.contract?.name ?? finding?.functionName ?? "",
+  ).trim();
+
+  return (
+    changedInterfaces.find((item) => {
+      const itemPath = normalizeFileReference(item?.path ?? "");
+      const itemName = String(item?.name ?? "").trim();
+      return itemPath === targetPath && itemName === targetName;
+    }) ??
+    changedInterfaces.find(
+      (item) => getFindingsForInterfaceItem({ item, findings: [finding] }).length > 0,
+    ) ??
+    null
+  );
+}
+
+function InterfaceImprovementDetails({
+  title,
+  interfaceItem,
+  findings,
+  onSelectIssue,
+  onSelectNode,
+  worktreePath,
+  compactConsumers = false,
+}) {
+  const primaryFinding = findings[0] ?? null;
+  const details = buildInterfaceDetailsModel(interfaceItem, primaryFinding);
+  const codeLocation = parseCodeLocation(
+    primaryFinding?.location ?? details.path,
+    worktreePath,
+  );
+  const visibleConsumers = compactConsumers
+    ? details.consumers.slice(0, 3)
+    : details.consumers;
+  const hiddenConsumerCount = details.consumers.length - visibleConsumers.length;
+
+  return html`
+    <div>
+      <${InterfaceSuggestionCard}
+        title=${title || details.name}
+        path=${codeLocation?.label ?? details.path}
+        metaContent=${renderOpenInCursorLink(
+          primaryFinding?.location ?? details.path,
+          worktreePath,
+        )}
+        consumerLabel=${details.consumerParts?.length
+          ? `${details.consumerParts.length} consumers affected`
+          : ""}
+        current=${details.current}
+        suggestions=${details.suggestions}
+      />
+      ${interfaceItem ? renderSourceOfTruthMeta(interfaceItem, worktreePath) : null}
+      <div className="inspector-section">
+        <p className="inspector-kicker">Consumers</p>
+        <div className="inspector-list inspector-list-compact">
+          ${visibleConsumers.length
+            ? visibleConsumers.map(
+                (consumer) =>
+                  html`<div
+                    key=${consumer.path}
+                    className="inspector-list-item static"
+                  >
+                    <span>
+                      <strong>${consumer.path.split("/").slice(-1)[0]}</strong>
+                      ${renderOpenInCursorLink(consumer.path, worktreePath)}
+                      <span className="inspector-copy inspector-copy-secondary"
+                        >${consumer.preview}</span
+                      >
+                    </span>
+                  </div>`,
+              )
+            : html`<div className="inspector-list-item static muted">
+                <span>No external consumers detected.</span>
+              </div>`}
+        </div>
+        ${hiddenConsumerCount > 0
+          ? html`<p className="inspector-copy inspector-copy-secondary">
+              ${hiddenConsumerCount} more consumer${hiddenConsumerCount === 1
+                ? ""
+                : "s"} hidden in this summary.
+            </p>`
+          : null}
+      </div>
+      <div className="inspector-section">
+        <p className="inspector-kicker">Suggested improvements</p>
+        ${primaryFinding?.better
+          ? html`<p className="inspector-copy">
+              <strong>Suggested interface:</strong> ${primaryFinding.better}
+            </p>`
+          : null}
+        ${primaryFinding?.whyBetter
+          ? html`<p className="inspector-copy inspector-copy-secondary">
+              ${primaryFinding.whyBetter}
+            </p>`
+          : null}
+        <${FindingsList} findings=${findings} onSelectIssue=${onSelectIssue} />
+      </div>
+    </div>
+  `;
+}
+
 function OverviewReviewPanel({
   changedLayers,
   graphSummary,
   reviewDiff,
   findings,
+  changedInterfaces,
   changedPaths,
   onSelectNode,
   onSelectIssue,
+  worktreePath,
 }) {
   const changedPathSet = useMemo(
     () =>
@@ -191,15 +431,39 @@ function OverviewReviewPanel({
       6,
     );
   }, [changedPathSet, findings]);
+  const importantFindingCards = useMemo(
+    () =>
+      importantFindings.map((finding) => ({
+        finding,
+        interfaceItem: findInterfaceItemForFinding(finding, changedInterfaces),
+      })),
+    [changedInterfaces, importantFindings],
+  );
+
   return html`
     <div>
       <div className="inspector-section">
         <p className="inspector-kicker">Top improvements to make</p>
-        ${importantFindings.length
-          ? html`<${FindingsList}
-              findings=${importantFindings}
-              onSelectIssue=${onSelectIssue}
-            />`
+        ${importantFindingCards.length
+          ? html`<div className="review-findings-groups">
+              ${importantFindingCards.map(
+                ({ finding, interfaceItem }) =>
+                  html`<div
+                    key=${finding.id}
+                    className="inspector-list-item static interface-improvement-card"
+                  >
+                    <${InterfaceImprovementDetails}
+                      title=${finding.functionName || finding.title}
+                      interfaceItem=${interfaceItem}
+                      findings=${[finding]}
+                      onSelectIssue=${onSelectIssue}
+                      onSelectNode=${onSelectNode}
+                      worktreePath=${worktreePath}
+                      compactConsumers=${true}
+                    />
+                  </div>`,
+              )}
+            </div>`
           : html`<p className="inspector-copy inspector-copy-secondary">
               No interface simplifications surfaced for this view yet.
             </p>`}
@@ -298,6 +562,7 @@ function FileDetailsPanel({
   reviewDiffFile,
   findings,
   onSelectIssue,
+  worktreePath,
 }) {
   const normalizedInsight = normalizeInsight(insight);
   return html`
@@ -311,6 +576,7 @@ function FileDetailsPanel({
             "This file participates in the currently selected interface review."}
           </p>
         </div>
+        ${renderOpenInCursorLink(node.path ?? node.label, worktreePath)}
       </div>
       <div className="inspector-section">
         <p className="inspector-kicker">Boundary findings</p>
@@ -331,8 +597,8 @@ function RepoPartDetailsPanel({
   changedFiles,
   changedInterfaces,
   selectedIssue,
-  viewerControl,
   onSelectIssue,
+  worktreePath,
 }) {
   return html`
     <div>
@@ -360,9 +626,7 @@ function RepoPartDetailsPanel({
                 >
                   <div>
                     <strong>${item.name}</strong>
-                    <span className="inspector-copy inspector-copy-secondary"
-                      >${item.path}</span
-                    >
+                    ${renderOpenInCursorLink(item.path, worktreePath)}
                     ${getCollapsedAliasPaths(item).length
                       ? html`<span
                           className="inspector-copy inspector-copy-secondary"
@@ -411,9 +675,12 @@ function RepoPartDetailsPanel({
                               html`<${PromptSuggestionCard}
                                 key=${finding.id}
                                 issue=${finding}
-                                viewerControl=${viewerControl}
                                 initiallyExpanded=${selectedIssue?.id ===
                                 finding.id}
+                                includedFiles=${buildPromptIncludedFiles(
+                                  item,
+                                  finding,
+                                )}
                               />`,
                           )}
                         </div>`
@@ -443,7 +710,7 @@ function RepoPartDetailsPanel({
                     key=${file.path}
                     className="inspector-list-item static"
                   >
-                    <span>${file.path}</span>
+                    ${renderOpenInCursorLink(file.path, worktreePath)}
                     <span className="inspector-list-meta"
                       >${file.status} ·
                       +${file.insertions}/-${file.deletions}</span
@@ -457,41 +724,39 @@ function RepoPartDetailsPanel({
   `;
 }
 
-function InterfaceDetailsPanel({
+function ProviderDetailsPanel({
   node,
-  interfaceItem,
+  interfaceItems,
   findings,
+  selectedIssue,
+  onSelectNode,
   onSelectIssue,
   worktreePath,
 }) {
-  const primaryFinding = findings[0] ?? null;
-  const codeLocation = parseCodeLocation(
-    primaryFinding?.location ?? "",
-    worktreePath,
+  const sharedConsumers = buildSharedConsumerList(interfaceItems);
+  const combineSignals = sharedConsumers.filter(
+    (consumer) => consumer.interfaces.length > 1,
   );
+
   return html`
     <div>
       <div className="inspector-header-row">
         <div>
           <h2 className="inspector-title">${node.label}</h2>
-          <p className="inspector-copy">${interfaceItem.declaration}</p>
-          <p className="inspector-copy inspector-copy-secondary">
-            ${interfaceItem.path}
+          <p className="inspector-copy">
+            ${`${interfaceItems.length} changed interface${interfaceItems.length === 1 ? "" : "s"} currently feed ${sharedConsumers.length} downstream consumer${sharedConsumers.length === 1 ? "" : "s"}.`}
           </p>
-          ${codeLocation
-            ? html`<p className="inspector-copy inspector-copy-secondary">
-                Defined at
-                <a href=${codeLocation.cursorUrl}>${codeLocation.label}</a>
-              </p>`
-            : null}
+          <p className="inspector-copy inspector-copy-secondary">
+            Prioritize consumers that depend on multiple sibling functions. Those
+            are the clearest combine candidates.
+          </p>
         </div>
       </div>
-      ${renderSourceOfTruthMeta(interfaceItem)}
       <div className="inspector-section">
-        <p className="inspector-kicker">Consumers</p>
+        <p className="inspector-kicker">Shared consumers</p>
         <div className="inspector-list inspector-list-compact">
-          ${interfaceItem.consumers.length
-            ? interfaceItem.consumers.map(
+          ${sharedConsumers.length
+            ? sharedConsumers.map(
                 (consumer) =>
                   html`<div
                     key=${consumer.path}
@@ -500,52 +765,214 @@ function InterfaceDetailsPanel({
                     <span>
                       <strong>${consumer.path.split("/").slice(-1)[0]}</strong>
                       <span className="inspector-copy inspector-copy-secondary"
-                        >${consumer.path}</span
+                        >Uses ${consumer.interfaces.join(", ")}</span
                       >
-                      <span className="inspector-copy inspector-copy-secondary"
-                        >${consumer.preview}</span
-                      >
+                      ${consumer.preview
+                        ? html`<span
+                            className="inspector-copy inspector-copy-secondary"
+                            >${consumer.preview}</span
+                          >`
+                        : null}
                     </span>
                   </div>`,
               )
             : html`<div className="inspector-list-item static muted">
-                <span>No external consumers detected.</span>
+                <span>No downstream consumers were detected for this file.</span>
               </div>`}
         </div>
       </div>
+      ${combineSignals.length
+        ? html`<div className="inspector-section">
+            <p className="inspector-kicker">Combine signals</p>
+            <div className="inspector-list inspector-list-compact">
+              ${combineSignals.map(
+                (consumer) =>
+                  html`<div
+                    key=${`${consumer.path}:combine`}
+                    className="inspector-list-item static"
+                  >
+                    <span>
+                      <strong>${consumer.path.split("/").slice(-1)[0]}</strong>
+                      <span className="inspector-copy inspector-copy-secondary"
+                        >This consumer depends on ${consumer.interfaces.length}
+                        changed interfaces: ${consumer.interfaces.join(", ")}</span
+                      >
+                    </span>
+                  </div>`,
+              )}
+            </div>
+          </div>`
+        : null}
       <div className="inspector-section">
-        <p className="inspector-kicker">
-          Current interface and better interface
-        </p>
-        <${InterfaceSuggestionCard}
-          title=${interfaceItem.name}
-          path=${codeLocation?.label ?? interfaceItem.path}
-          consumerLabel=${interfaceItem.consumerParts?.length
-            ? `${interfaceItem.consumerParts.length} consumers affected`
-            : ""}
-          current=${primaryFinding?.current ||
-          interfaceItem.currentDeclaration ||
-          interfaceItem.previewSnippet ||
-          interfaceItem.snippet ||
-          interfaceItem.declaration}
-          suggestions=${primaryFinding?.suggestions ?? []}
-        />
-      </div>
-      <div className="inspector-section">
-        <p className="inspector-kicker">Suggested improvements</p>
-        ${primaryFinding?.better
-          ? html`<p className="inspector-copy">
-              <strong>Suggested interface:</strong> ${primaryFinding.better}
-            </p>`
-          : null}
-        ${primaryFinding?.whyBetter
-          ? html`<p className="inspector-copy inspector-copy-secondary">
-              ${primaryFinding.whyBetter}
-            </p>`
-          : null}
-        <${FindingsList} findings=${findings} onSelectIssue=${onSelectIssue} />
+        <p className="inspector-kicker">Changed interfaces</p>
+        <div className="inspector-list inspector-list-compact">
+          ${interfaceItems.map((item) => {
+            const matchingFindings = getFindingsForInterfaceItem({
+              item,
+              findings,
+            });
+            return html`<div
+              key=${getInterfaceNodeId(item)}
+              className="inspector-list-item static interface-improvement-card"
+            >
+              <div>
+                <button
+                  className="inspector-inline-action"
+                  onClick=${() =>
+                    onSelectNode({
+                      id: getInterfaceNodeId(item),
+                      label: item.name,
+                      path: item.path,
+                      nodeKind: "interface",
+                    })}
+                >
+                  Open interface
+                </button>
+                <strong>${item.name}</strong>
+                <span className="inspector-copy inspector-copy-secondary"
+                  >${item.currentDeclaration || item.declaration}</span
+                >
+                <span className="inspector-copy inspector-copy-secondary"
+                  >${item.consumers.length} consumers</span
+                >
+                ${matchingFindings.length
+                  ? html`<div className="interface-prompt-stack">
+                      ${matchingFindings.map(
+                        (finding) =>
+                          html`<${PromptSuggestionCard}
+                            key=${finding.id}
+                            issue=${finding}
+                            initiallyExpanded=${selectedIssue?.id === finding.id}
+                            includedFiles=${buildPromptIncludedFiles(
+                              item,
+                              finding,
+                            )}
+                          />`,
+                      )}
+                    </div>`
+                  : null}
+              </div>
+            </div>`;
+          })}
+        </div>
       </div>
     </div>
+  `;
+}
+
+function ConsumerDetailsPanel({
+  node,
+  interfaceItems,
+  findings,
+  selectedIssue,
+  onSelectNode,
+  onSelectIssue,
+  worktreePath,
+}) {
+  const combineSignal = interfaceItems.length > 1;
+
+  return html`
+    <div>
+      <div className="inspector-header-row">
+        <div>
+          <h2 className="inspector-title">${node.label}</h2>
+          <p className="inspector-copy">
+            This consumer currently depends on ${interfaceItems.length} changed
+            interface${interfaceItems.length === 1 ? "" : "s"}.
+          </p>
+          <p className="inspector-copy inspector-copy-secondary">
+            ${combineSignal
+              ? "Because this consumer touches multiple changed entrypoints, check whether those functions are really different jobs or should collapse into one clearer API."
+              : "This consumer only touches one changed entrypoint right now."}
+          </p>
+        </div>
+        ${renderOpenInCursorLink(node.path ?? node.label, worktreePath)}
+      </div>
+      <div className="inspector-section">
+        <p className="inspector-kicker">Consumed interfaces</p>
+        <div className="inspector-list inspector-list-compact">
+          ${interfaceItems.length
+            ? interfaceItems.map((item) => {
+                const matchingFindings = getFindingsForInterfaceItem({
+                  item,
+                  findings,
+                });
+                return html`<div
+                  key=${getInterfaceNodeId(item)}
+                  className="inspector-list-item static interface-improvement-card"
+                >
+                  <div>
+                    <button
+                      className="inspector-inline-action"
+                      onClick=${() =>
+                        onSelectNode({
+                          id: getInterfaceNodeId(item),
+                          label: item.name,
+                          path: item.path,
+                          nodeKind: "interface",
+                        })}
+                    >
+                      Open interface
+                    </button>
+                    <strong>${item.name}</strong>
+                    ${renderOpenInCursorLink(item.path, worktreePath)}
+                    <span className="inspector-copy inspector-copy-secondary"
+                      >${item.currentDeclaration || item.declaration}</span
+                    >
+                    ${matchingFindings.length
+                      ? html`<div className="interface-prompt-stack">
+                          ${matchingFindings.map(
+                            (finding) =>
+                              html`<${PromptSuggestionCard}
+                                key=${finding.id}
+                                issue=${finding}
+                                initiallyExpanded=${selectedIssue?.id ===
+                                finding.id}
+                                includedFiles=${buildPromptIncludedFiles(
+                                  item,
+                                  finding,
+                                )}
+                              />`,
+                          )}
+                        </div>`
+                      : null}
+                  </div>
+                </div>`;
+              })
+            : html`<div className="inspector-list-item static muted">
+                <span>No changed interfaces are linked to this consumer.</span>
+              </div>`}
+        </div>
+      </div>
+      ${combineSignal
+        ? html`<div className="inspector-section">
+            <p className="inspector-kicker">Combine signal</p>
+            <p className="inspector-copy inspector-copy-secondary">
+              One consumer needing several changed sibling interfaces is often a
+              sign that the boundary is making consumers choose among variants
+              instead of calling one clear entrypoint.
+            </p>
+          </div>`
+        : null}
+    </div>
+  `;
+}
+
+function InterfaceDetailsPanel({
+  node,
+  interfaceItem,
+  findings,
+  onSelectIssue,
+  worktreePath,
+}) {
+  return html`
+    <${InterfaceImprovementDetails}
+      title=${node.label}
+      interfaceItem=${interfaceItem}
+      findings=${findings}
+      onSelectIssue=${onSelectIssue}
+      worktreePath=${worktreePath}
+    />
   `;
 }
 
@@ -558,5 +985,7 @@ export {
   GroupDetailsPanel,
   FileDetailsPanel,
   RepoPartDetailsPanel,
+  ProviderDetailsPanel,
+  ConsumerDetailsPanel,
   InterfaceDetailsPanel,
 };
