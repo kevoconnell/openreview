@@ -1316,15 +1316,14 @@ function OverviewGraphPage({
             : focusedNode?.nodeKind === "provider"
               ? html`<${ProviderDetailsPanel}
                   node=${focusedNode}
-                  interfaceItems=${changedInterfacesByProviderPath[
-                    focusedNode.path
-                  ] ?? []}
-                  findings=${issuesByNodeId[focusedNode.id] ?? []}
-                  selectedIssue=${activeIssue}
-                  onSelectNode=${handleSelectNode}
-                  onSelectIssue=${handleSelectIssue}
-                  worktreePath=${payload.worktreePath}
-                />`
+                interfaceItems=${changedInterfacesByProviderPath[
+                  focusedNode.path
+                ] ?? []}
+                findings=${issuesByNodeId[focusedNode.id] ?? []}
+                selectedIssue=${activeIssue}
+                onSelectIssue=${handleSelectIssue}
+                worktreePath=${payload.worktreePath}
+              />`
               : focusedNode?.nodeKind === "consumer"
                 ? html`<${ConsumerDetailsPanel}
                     node=${focusedNode}

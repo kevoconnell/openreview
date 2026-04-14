@@ -696,7 +696,6 @@ function ProviderDetailsPanel({
   interfaceItems,
   findings,
   selectedIssue,
-  onSelectNode,
   onSelectIssue,
   worktreePath,
 }) {
